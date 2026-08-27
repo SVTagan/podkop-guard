@@ -2,11 +2,18 @@
 
 ## 0.2.2 — 2026-08-27
 
-Исправление совместимости CLI-команд с BusyBox `mktemp` на целевом OpenWrt.
+Исправления совместимости CLI-команд с BusyBox и завершение LuCI-интеграции.
 
 - `verify-lkg` и `derive-subnets` больше не используют шаблон вида `XXXXXX.json`: BusyBox `mktemp` требует, чтобы `XXXXXX` находился в конце шаблона.
 - Временный JSON теперь создаётся через `mktemp /tmp/podkop-guard-lkg.XXXXXX`; расширение файла для `sing-box rule-set decompile` не требуется.
-- Ошибка обнаружена при запуске `verify-lkg` из LuCI `Custom Commands`; `status` и полный `refresh-test` при этом успешно отработали.
+- Ошибка обнаружена при запуске `verify-lkg` из LuCI `Custom Commands`; после исправления `verify-lkg` повторно проверен на реальном OpenWrt и завершился с `Code: 0`, показав `version=3`, `rules=16`, `domains=1562`, `cidrs=1169`, `special_rules=2`.
+- `status` и полный `refresh-test` также успешно проверены через LuCI `Custom Commands`; `refresh-test` завершился с `Code: 0` и не изменил persistent LKG.
+- Установщик теперь автоматически интегрируется с LuCI на роутерах, где установлен `luci-base`: при необходимости пытается установить `luci-app-commands` и создаёт четыре именованные команды `podkop_guard_*`.
+- LuCI-интеграция остаётся optional dependency: если пакет `luci-app-commands` недоступен или не устанавливается, основной `podkop-guard` продолжает устанавливаться и работать без web UI.
+- На headless OpenWrt без LuCI установщик не подтягивает LuCI-пакеты.
+- Для всех создаваемых LuCI-команд принудительно заданы `param=0` и `public=0`; дополнительные аргументы и запуск без авторизации запрещены.
+- Повторная установка идемпотентно обновляет те же именованные UCI-секции и не создаёт дубликаты; существующее пользовательское `description` сохраняется.
+- `uninstall.sh` удаляет только UCI-секции `podkop-guard`, но намеренно не удаляет `luci-app-commands`, так как этот пакет может использоваться другими Custom Commands.
 
 ## 0.2.1 — 2026-08-27
 
