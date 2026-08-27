@@ -26,12 +26,9 @@ need() {
     command -v "$1" >/dev/null 2>&1 || fail "Required command not found: $1"
 }
 
-need gh
-need awk
-need sed
-need grep
-need mktemp
-need sh
+for cmd in gh awk sed grep mktemp sh head cat rm; do
+    need "$cmd"
+done
 
 gh auth status -h github.com >/dev/null 2>&1 || \
     fail "GitHub CLI is not authenticated. Run: gh auth login"
@@ -79,7 +76,7 @@ grep -Fq "Текущая версия: **${VERSION}**" "$TMP_DIR/README.md" || \
     fail "README.md version does not match ${VERSION}."
 grep -Fq "Current version: **${VERSION}**" "$TMP_DIR/README.en.md" || \
     fail "README.en.md version does not match ${VERSION}."
-grep -Eq "^## ${VERSION}([[:space:]]|$)" "$TMP_DIR/CHANGELOG.md" || \
+grep -Fq "## ${VERSION} " "$TMP_DIR/CHANGELOG.md" || \
     fail "CHANGELOG.md has no section for ${VERSION}."
 
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
