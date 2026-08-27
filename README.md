@@ -55,7 +55,7 @@ Init-сервис запускается с `START=98`, то есть непос
 - `lkg-subnets.lst` — обычный Podkop Local Subnet List только с безусловными `ip_cidr`;
 - `cache.db` — проверенный sing-box remote rule-set cache для холодного старта.
 
-`cache.db` также используется как маркер времени последнего полностью успешного refresh: отдельный timestamp-файл не нужен.
+`cache.db` также используется как маркер времени последнего полностью успешного refresh: отдельный timestamp-файл не нужен. Возраст snapshot определяется штатным BusyBox `date -r FILE +%s`, поэтому отдельный `stat`/coreutils не требуется.
 
 ## Как обновляется LKG
 
@@ -71,7 +71,7 @@ podkop.main.community_lists
 https://github.com/itdoginfo/allow-domains/releases/latest/download/<list>.srs
 ```
 
-Сначала выполняется обычный `curl` с жёсткими timeout. Если он не прошёл и `podkop.main.connection_type='vpn'`, выполняется одна повторная попытка через текущий `podkop.main.interface` с `curl --interface`.
+Сначала выполняется обычный `curl` с жёсткими timeout. Если он не прошёл и секция `main` работает в VPN-режиме, выполняется одна повторная попытка через текущий `podkop.main.interface` с `curl --interface`. Для совместимости с вариантами UCI-схемы проверяются как `podkop.main.connection_type`, так и `podkop.main.type`.
 
 Если хотя бы один обязательный SRS получить не удалось, refresh немедленно прекращается. Частичный snapshot никогда не принимается.
 
@@ -134,7 +134,9 @@ Podkop/sing-box продолжает работать со штатным cache 
 - sing-box;
 - `curl`;
 - `jq`;
-- стандартные BusyBox-утилиты, включая `nice`, `stat`, `sort`, `cmp`, `logger`.
+- стандартные BusyBox-утилиты, включая `nice`, `date` с поддержкой `-r`, `sort`, `cmp`, `logger`.
+
+Отдельная утилита `stat` не требуется.
 
 Установщик рассчитан на OpenWrt с `opkg`.
 
@@ -257,52 +259,3 @@ logread | grep podkop-guard
 - не поднимает локальный HTTP-сервер.
 
 Podkop продолжает полностью владеть обычной маршрутизацией и штатным обновлением списков.
-
-## Ограничения
-
-Текущая версия ориентирована на `podkop.main.community_lists`.
-
-Если Community Lists были изменены вручную, а последнему LKG ещё нет 24 часов, автоматический worker не обязан обновиться сразу. После изменения списка можно вручную выполнить:
-
-```sh
-podkop-guard refresh
-```
-
-VPN fallback при скачивании используется только когда `podkop.main.connection_type='vpn'` и задан `podkop.main.interface`. В proxy-режиме используется только direct download.
-
-Порядок загрузки `START=98 → Podkop START=99` подтверждён для Podkop 0.7.21. После крупных обновлений Podkop рекомендуется проверить его init order.
-
-## Проверка на реальном роутере
-
-На исходной тестовой конфигурации были отдельно доказаны:
-
-- отказ direct-доступа к GitHub при рабочем скачивании через AmneziaWG;
-- отсутствие Telegram CIDR в `podkop_subnets` и мгновенное восстановление после их ручного добавления;
-- загрузка persistent Local Subnet LKG до асинхронного Community list update;
-- cold-start sing-box с cache и полностью мёртвым SRS download path;
-- FATAL cold-start без cache при том же мёртвом download path;
-- успешный offline-start со всеми 14 выбранными Community SRS;
-- работа со stale cache при неудачных refresh;
-- восстановление `/tmp/sing-box/cache.db` через `S98podkop-guard` и последующий штатный запуск Podkop.
-
-История изменений: [CHANGELOG.md](CHANGELOG.md).
-
-## Удаление
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/SVTagan/podkop-guard/main/uninstall.sh \
-  -o /tmp/podkop-guard-uninstall.sh && \
-sh /tmp/podkop-guard-uninstall.sh
-```
-
-По умолчанию persistent LKG удаляется. Чтобы сохранить `/etc/podkop-guard`:
-
-```sh
-KEEP_LKG=1 sh /tmp/podkop-guard-uninstall.sh
-```
-
-Удаление не делает автоматический reload Podkop.
-
-## Лицензия
-
-MIT — см. [LICENSE](LICENSE).
