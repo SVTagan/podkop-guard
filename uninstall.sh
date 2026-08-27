@@ -35,6 +35,27 @@ if command -v uci >/dev/null 2>&1; then
         uci commit podkop >/dev/null 2>&1 || warn "Could not commit Podkop configuration."
         warn "Podkop was not reloaded automatically. Reload it manually when convenient."
     fi
+
+    luci_changed=0
+    for section in \
+        podkop_guard_status \
+        podkop_guard_verify \
+        podkop_guard_test \
+        podkop_guard_refresh; do
+        if uci -q get "luci.${section}" >/dev/null 2>&1; then
+            uci -q delete "luci.${section}" >/dev/null 2>&1 || \
+                warn "Could not remove LuCI section luci.${section}."
+            luci_changed=1
+        fi
+    done
+
+    if [ "$luci_changed" -eq 1 ]; then
+        if uci commit luci >/dev/null 2>&1; then
+            info "Removed podkop-guard LuCI Custom Commands."
+        else
+            warn "Could not commit LuCI configuration."
+        fi
+    fi
 fi
 
 rm -f "$INIT" "$WORKER"
@@ -47,4 +68,6 @@ else
     info "Removed persistent LKG data from ${STATE_DIR}."
 fi
 
+# luci-app-commands is intentionally not removed: it may be used by unrelated
+# custom commands on the router.
 info "podkop-guard uninstalled."
