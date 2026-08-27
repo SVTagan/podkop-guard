@@ -12,7 +12,7 @@
 
 ## Статус
 
-Текущая версия: **0.2.1**.
+Текущая версия: **0.2.2**.
 
 Полный pipeline проверен на реальном **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22**:
 
@@ -22,7 +22,8 @@
 - offline cold-start cache test прошёл с намеренно недоступным download path;
 - `refresh-test` занял около 15 секунд и не изменил SHA-256 persistent LKG-файлов;
 - выполнен настоящий reboot OpenWrt: `podkop-guard` на `START=98` восстановил cache до запуска Podkop на `START=99`;
-- после reboot sing-box runtime поднялся, LKG-подсети загрузились в nftables, проверенные сервисы продолжили работать.
+- после reboot sing-box runtime поднялся, LKG-подсети загрузились в nftables, проверенные сервисы продолжили работать;
+- `status` и `refresh-test` проверены через LuCI `Custom Commands`; в v0.2.2 исправлена совместимость `verify-lkg`/`derive-subnets` с BusyBox `mktemp`.
 
 Это подтверждение конкретной протестированной конфигурации, а не гарантия совместимости со всеми версиями OpenWrt, Podkop и sing-box.
 
@@ -150,7 +151,7 @@ Podkop/sing-box продолжает работать со штатным cache 
 - sing-box;
 - `curl`;
 - `jq`;
-- стандартные BusyBox-утилиты, включая `nice`, `date` с поддержкой `-r`, `sort`, `cmp`, `logger`.
+- стандартные BusyBox-утилиты, включая `nice`, `date` с поддержкой `-r`, `sort`, `cmp`, `logger`, `mktemp`.
 
 Отдельная утилита `stat` не требуется.
 
@@ -239,6 +240,40 @@ podkop-guard version
 ```
 
 `daemon` предназначен для procd и вручную обычно не нужен.
+
+## LuCI Custom Commands (необязательно)
+
+Если установлен `luci-app-commands`, можно добавить четыре безопасных кнопки для повседневной проверки:
+
+```sh
+uci set luci.podkop_guard_status='command'
+uci set luci.podkop_guard_status.name='Podkop Guard: Status'
+uci set luci.podkop_guard_status.command='/usr/bin/podkop-guard status'
+uci set luci.podkop_guard_status.param='0'
+uci set luci.podkop_guard_status.public='0'
+
+uci set luci.podkop_guard_verify='command'
+uci set luci.podkop_guard_verify.name='Podkop Guard: Verify LKG'
+uci set luci.podkop_guard_verify.command='/usr/bin/podkop-guard verify-lkg'
+uci set luci.podkop_guard_verify.param='0'
+uci set luci.podkop_guard_verify.public='0'
+
+uci set luci.podkop_guard_test='command'
+uci set luci.podkop_guard_test.name='Podkop Guard: Refresh Test'
+uci set luci.podkop_guard_test.command='/usr/bin/podkop-guard refresh-test'
+uci set luci.podkop_guard_test.param='0'
+uci set luci.podkop_guard_test.public='0'
+
+uci set luci.podkop_guard_refresh='command'
+uci set luci.podkop_guard_refresh.name='Podkop Guard: Refresh LKG'
+uci set luci.podkop_guard_refresh.command='/usr/bin/podkop-guard refresh'
+uci set luci.podkop_guard_refresh.param='0'
+uci set luci.podkop_guard_refresh.public='0'
+
+uci commit luci
+```
+
+`Refresh Test` выполняет полный pipeline без записи persistent LKG. `Refresh LKG` после успешной валидации действительно обновляет persistent snapshot. `param=0` запрещает произвольные дополнительные аргументы, `public=0` не разрешает запуск команды без авторизации в LuCI.
 
 ## Логи
 
