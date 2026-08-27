@@ -1,0 +1,166 @@
+name: Create release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag; must match podkop-guard version, for example v0.2.2'
+        required: true
+        default: 'v0.2.2'
+        type: string
+      prerelease:
+        description: 'Mark this GitHub Release as a prerelease'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read and validate version
+        id: guard
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Releases must be created from the main branch. Current ref: ${GITHUB_REF}" >&2
+            exit 1
+          fi
+
+          version="$(sed -n 's/^VERSION="\([^"]*\)".*/\1/p' podkop-guard | head -n 1)"
+          if [[ -z "${version}" ]]; then
+            echo "Cannot determine VERSION from podkop-guard." >&2
+            exit 1
+          fi
+
+          expected_tag="v${version}"
+          if [[ "${RELEASE_TAG}" != "${expected_tag}" ]]; then
+            echo "Release tag ${RELEASE_TAG} does not match podkop-guard version ${version}. Expected ${expected_tag}." >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate release tree
+        shell: bash
+        env:
+          VERSION: ${{ steps.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          sh -n podkop-guard
+          sh -n install.sh
+          sh -n uninstall.sh
+          sh -n podkop-guard.init
+
+          grep -Fq "Текущая версия: **${VERSION}**" README.md || {
+            echo "README.md version does not match ${VERSION}." >&2
+            exit 1
+          }
+
+          grep -Fq "Current version: **${VERSION}**" README.en.md || {
+            echo "README.en.md version does not match ${VERSION}." >&2
+            exit 1
+          }
+
+          grep -Fq "## ${VERSION} " CHANGELOG.md || {
+            echo "CHANGELOG.md has no section for ${VERSION}." >&2
+            exit 1
+          }
+
+      - name: Build release notes
+        shell: bash
+        env:
+          VERSION: ${{ steps.guard.outputs.version }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          awk -v v="${VERSION}" '
+            BEGIN { capture = 0 }
+            {
+              if (index($0, "## " v " ") == 1 || $0 == "## " v) {
+                capture = 1
+                next
+              }
+              if (capture && $0 ~ /^## /) {
+                exit
+              }
+              if (capture) {
+                print
+              }
+            }
+          ' CHANGELOG.md > changelog-section.md
+
+          if [[ ! -s changelog-section.md ]]; then
+            echo "Could not extract CHANGELOG section for ${VERSION}." >&2
+            exit 1
+          fi
+
+          {
+            echo "# podkop-guard ${RELEASE_TAG}"
+            echo
+            echo "Первый публичный GitHub Release проекта podkop-guard — небольшой helper для повышения отказоустойчивости Podkop/OpenWrt с проверенным Last Known Good snapshot Community Lists и восстановлением sing-box cache перед запуском Podkop после reboot/power loss."
+            echo
+            if [[ "${VERSION}" == "0.2.2" ]]; then
+              echo "Версия 0.2.2 проверена на реальном **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22**. Проверены настоящий reboot/cold-start, offline cache validation, Local Subnet LKG, periodic worker, LuCI Custom Commands и повторная установка без изменения persistent LKG."
+              echo
+            fi
+            echo "Проект предоставляется как есть; использование — на свой риск. Перед установкой рекомендуется прочитать README и иметь доступ к роутеру для восстановления конфигурации."
+            echo
+            echo "## Изменения"
+            echo
+            cat changelog-section.md
+            echo
+            echo "---"
+            echo
+            echo "[README](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/README.md) · [English README](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/README.en.md) · [CHANGELOG](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/CHANGELOG.md)"
+          } > release-notes.md
+
+      - name: Create permanent GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+          VERSION: ${{ steps.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists. Versions are immutable; create a new version instead." >&2
+            exit 1
+          fi
+
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_TAG} already exists without a GitHub Release. Check it manually before publishing." >&2
+            exit 1
+          fi
+
+          args=(
+            release create "${RELEASE_TAG}"
+            --target "${GITHUB_SHA}"
+            --title "podkop-guard ${VERSION}"
+            --notes-file release-notes.md
+          )
+
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+
+          gh "${args[@]}"
