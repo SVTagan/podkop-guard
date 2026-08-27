@@ -78,9 +78,11 @@ A: saved cache + dead download -> sing-box remained running
 B: no cache + same dead download -> sing-box exited with FATAL initial rule-set error
 ```
 
-The same test was then repeated with **all 14 currently configured remote Community rule-sets**. With the saved cache and every network download forced through the dead detour, sing-box started successfully and remained running. No remote download was required.
+The same test was then repeated with **all 14 currently configured remote Community rule-sets**. With the saved cache and every network download forced through the dead detour, sing-box started successfully and remained running. No remote download was required for startup.
 
-This proves that the saved cache can satisfy the current remote Community SRS set during a cold start when GitHub is unavailable.
+A separate stale-cache test forced every cached remote rule-set to expire immediately with `update_interval = 1s` while every refresh attempt still used the dead detour. sing-box started successfully and stayed running while logging repeated refresh errors. Therefore an expired cached ruleset remains usable as LKG data; failed background refreshes do not invalidate it or turn startup failure into a fatal condition.
+
+This proves that the saved cache can satisfy the current remote Community SRS set during a cold start when GitHub is unavailable, even if the cached entries are older than their configured refresh interval.
 
 ## Current architecture
 
