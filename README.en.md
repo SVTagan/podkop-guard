@@ -10,6 +10,22 @@ The project was created after a real failure where Podkop could not download par
 
 This is an independent project and is not affiliated with the Podkop developers.
 
+## Status
+
+Current version: **0.2.1**.
+
+The full pipeline has been validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22** system:
+
+- `refresh-test` successfully processed all 14 Community Lists used on the test router;
+- the combined LKG passed compile/decompile round-trip validation without differences;
+- the Local Subnet LKG contained 1161 unconditional CIDRs, while 8 conditional CIDRs were intentionally skipped;
+- the offline cold-start cache test passed with an intentionally unavailable download path;
+- the full `refresh-test` took about 15 seconds and did not change the SHA-256 of any persistent LKG file;
+- a real OpenWrt reboot was performed: `podkop-guard` at `START=98` restored the cache before Podkop started at `START=99`;
+- after reboot, sing-box runtime came up, LKG subnets were loaded into nftables, and the tested routed services remained functional.
+
+This validates the specific tested configuration; it is not a guarantee of compatibility with every OpenWrt, Podkop, or sing-box version.
+
 ## What it does
 
 There are two independent protections.
@@ -207,9 +223,15 @@ The current implementation focuses on `podkop.main.community_lists`.
 
 If Community Lists are changed while the current LKG is less than 24 hours old, run `podkop-guard refresh` manually rather than waiting for the next scheduled refresh.
 
-VPN download fallback is used when the main Podkop section is detected as VPN mode and `podkop.main.interface` is set.
+VPN download fallback is used only when the main Podkop section is detected as VPN mode and `podkop.main.interface` is set.
 
 The `START=98 → Podkop START=99` boot order was verified for Podkop 0.7.21. Re-check init order after major Podkop upgrades.
+
+The project does not attempt to guarantee recovery from a corrupted persistent LKG or incompatible future changes to sing-box cache/rule-set formats.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
