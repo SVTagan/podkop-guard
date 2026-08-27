@@ -12,7 +12,7 @@ This is an independent project and is not affiliated with the Podkop developers.
 
 ## Status
 
-Current version: **0.2.1**.
+Current version: **0.2.2**.
 
 The full pipeline has been validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22** system:
 
@@ -22,7 +22,8 @@ The full pipeline has been validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.
 - the offline cold-start cache test passed with an intentionally unavailable download path;
 - the full `refresh-test` took about 15 seconds and did not change the SHA-256 of any persistent LKG file;
 - a real OpenWrt reboot was performed: `podkop-guard` at `START=98` restored the cache before Podkop started at `START=99`;
-- after reboot, sing-box runtime came up, LKG subnets were loaded into nftables, and the tested routed services remained functional.
+- after reboot, sing-box runtime came up, LKG subnets were loaded into nftables, and the tested routed services remained functional;
+- `status` and `refresh-test` were also exercised through LuCI Custom Commands; v0.2.2 fixes BusyBox `mktemp` compatibility for `verify-lkg` and `derive-subnets`.
 
 This validates the specific tested configuration; it is not a guarantee of compatibility with every OpenWrt, Podkop, or sing-box version.
 
@@ -128,7 +129,7 @@ Required components:
 - sing-box;
 - `curl`;
 - `jq`;
-- standard BusyBox tools including `nice`, `date` with `-r` support, `sort`, `cmp`, and `logger`.
+- standard BusyBox tools including `nice`, `date` with `-r` support, `sort`, `cmp`, `logger`, and `mktemp`.
 
 A separate `stat` utility is not required.
 
@@ -192,6 +193,40 @@ podkop-guard version
 ```
 
 `daemon` is intended for procd and normally should not be started manually.
+
+## Optional LuCI Custom Commands
+
+If `luci-app-commands` is installed, four authenticated commands can be added for convenient day-to-day checks:
+
+```sh
+uci set luci.podkop_guard_status='command'
+uci set luci.podkop_guard_status.name='Podkop Guard: Status'
+uci set luci.podkop_guard_status.command='/usr/bin/podkop-guard status'
+uci set luci.podkop_guard_status.param='0'
+uci set luci.podkop_guard_status.public='0'
+
+uci set luci.podkop_guard_verify='command'
+uci set luci.podkop_guard_verify.name='Podkop Guard: Verify LKG'
+uci set luci.podkop_guard_verify.command='/usr/bin/podkop-guard verify-lkg'
+uci set luci.podkop_guard_verify.param='0'
+uci set luci.podkop_guard_verify.public='0'
+
+uci set luci.podkop_guard_test='command'
+uci set luci.podkop_guard_test.name='Podkop Guard: Refresh Test'
+uci set luci.podkop_guard_test.command='/usr/bin/podkop-guard refresh-test'
+uci set luci.podkop_guard_test.param='0'
+uci set luci.podkop_guard_test.public='0'
+
+uci set luci.podkop_guard_refresh='command'
+uci set luci.podkop_guard_refresh.name='Podkop Guard: Refresh LKG'
+uci set luci.podkop_guard_refresh.command='/usr/bin/podkop-guard refresh'
+uci set luci.podkop_guard_refresh.param='0'
+uci set luci.podkop_guard_refresh.public='0'
+
+uci commit luci
+```
+
+`Refresh Test` performs the full pipeline without writing persistent LKG state. `Refresh LKG` does update the persistent snapshot after validation. `param=0` disables arbitrary additional arguments and `public=0` prevents unauthenticated execution.
 
 ## Logs
 
