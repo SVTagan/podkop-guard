@@ -1,50 +1,32 @@
 #!/bin/sh /etc/rc.common
 
-# Restore a known-good sing-box remote rule-set cache before Podkop starts.
-# Podkop 0.7.21 starts at START=99, so this service runs immediately before it.
+# Restore the persistent sing-box cache immediately before Podkop (START=99),
+# then keep a very lightweight validated LKG refresh worker under procd.
 
 START=98
 STOP=01
+USE_PROCD=1
 
-STATE_DIR="/etc/podkop-guard"
-CACHE_LKG="$STATE_DIR/cache.db"
-CACHE_RUNTIME="/tmp/sing-box/cache.db"
-EXPECTED_CACHE_PATH="/tmp/sing-box/cache.db"
+PROG="/usr/bin/podkop-guard"
 
-log() {
-    logger -t podkop-guard "$*"
+start_service() {
+    # Boot restore is intentionally best-effort: a missing snapshot must not
+    # block the rest of OpenWrt boot. podkop-guard logs the exact reason.
+    PODKOP_GUARD_SYSLOG=1 "$PROG" boot-restore || \
+        logger -t podkop-guard "warning: boot cache restore returned an error"
+
+    procd_open_instance
+    procd_set_param command "$PROG" daemon
+    procd_set_param respawn 3600 5 5
+
+    # The daemon sleeps in chunks of at most 60 seconds. This gives it enough
+    # time to receive SIGTERM, finish the current short child process and clean
+    # its /tmp lock/work directory without making service stop unbounded.
+    procd_set_param term_timeout 70
+    procd_close_instance
 }
 
-start() {
-    local configured_cache_path
-    configured_cache_path="$(uci -q get podkop.settings.cache_path 2>/dev/null)"
-    [ -n "$configured_cache_path" ] || configured_cache_path="$EXPECTED_CACHE_PATH"
-
-    if [ "$configured_cache_path" != "$EXPECTED_CACHE_PATH" ]; then
-        log "cache restore skipped: Podkop cache_path is $configured_cache_path, expected $EXPECTED_CACHE_PATH"
-        return 0
-    fi
-
-    if [ ! -s "$CACHE_LKG" ]; then
-        log "cache restore skipped: persistent snapshot missing or empty: $CACHE_LKG"
-        return 0
-    fi
-
-    if pidof sing-box >/dev/null 2>&1; then
-        log "cache restore skipped: sing-box is already running"
-        return 0
-    fi
-
-    mkdir -p /tmp/sing-box || {
-        log "cache restore failed: cannot create /tmp/sing-box"
-        return 1
-    }
-
-    cp "$CACHE_LKG" "$CACHE_RUNTIME" || {
-        log "cache restore failed: cannot copy $CACHE_LKG to $CACHE_RUNTIME"
-        return 1
-    }
-
-    chmod 0600 "$CACHE_RUNTIME"
-    log "restored persistent sing-box cache snapshot before Podkop startup"
+reload_service() {
+    stop
+    start
 }
