@@ -51,9 +51,18 @@ pkg_installed() {
     opkg status "$1" 2>/dev/null | grep -q '^Status: install .* installed$'
 }
 
+luci_present=0
+luci_commands_ready=0
+if pkg_installed luci-base || pkg_installed luci-app-commands; then
+    luci_present=1
+fi
+
 need_opkg_update=0
 pkg_installed curl || need_opkg_update=1
 pkg_installed jq || need_opkg_update=1
+if [ "$luci_present" -eq 1 ] && ! pkg_installed luci-app-commands; then
+    need_opkg_update=1
+fi
 
 if [ "$need_opkg_update" -eq 1 ]; then
     info "Updating opkg package lists..."
@@ -70,6 +79,20 @@ fi
 if ! pkg_installed jq; then
     info "Installing jq..."
     opkg install jq || fail "jq installation failed."
+fi
+
+# LuCI integration is optional for the core guard. On routers that already use
+# LuCI, install luci-app-commands when possible and expose the safe CLI actions
+# there. A feed/package problem must not make the core recovery helper fail.
+if pkg_installed luci-app-commands; then
+    luci_commands_ready=1
+elif [ "$luci_present" -eq 1 ]; then
+    info "Installing optional luci-app-commands integration..."
+    if opkg install luci-app-commands; then
+        luci_commands_ready=1
+    else
+        warn "Could not install luci-app-commands; continuing without LuCI Custom Commands."
+    fi
 fi
 
 for cmd in logger nice sort cmp date mktemp grep tail touch sync; do
@@ -128,6 +151,63 @@ chmod 0755 "$WORKER_DST" || fail "Failed to set permissions on ${WORKER_DST}."
 cp "$TMP_INIT" "$INIT_DST" || fail "Failed to copy ${INIT_DST}."
 chmod 0755 "$INIT_DST" || fail "Failed to set permissions on ${INIT_DST}."
 
+configure_luci_command() {
+    local section="$1" name="$2" command="$3" description="$4"
+
+    uci set "luci.${section}=command" || return 1
+    uci set "luci.${section}.name=${name}" || return 1
+    uci set "luci.${section}.command=${command}" || return 1
+    uci set "luci.${section}.param=0" || return 1
+    uci set "luci.${section}.public=0" || return 1
+
+    # Keep a user-customized description on upgrades; only provide a default
+    # when the named section did not have one yet.
+    if ! uci -q get "luci.${section}.description" >/dev/null 2>&1; then
+        uci set "luci.${section}.description=${description}" || return 1
+    fi
+}
+
+configure_luci_commands() {
+    [ "$luci_commands_ready" -eq 1 ] || return 0
+
+    configure_luci_command \
+        podkop_guard_status \
+        'Podkop Guard: Status' \
+        '/usr/bin/podkop-guard status' \
+        'Show current guard/LKG state, runtime status and intervals.' || return 1
+
+    configure_luci_command \
+        podkop_guard_verify \
+        'Podkop Guard: Verify LKG' \
+        '/usr/bin/podkop-guard verify-lkg' \
+        'Validate and inspect the persistent LKG SRS.' || return 1
+
+    configure_luci_command \
+        podkop_guard_test \
+        'Podkop Guard: Refresh Test' \
+        '/usr/bin/podkop-guard refresh-test' \
+        'Build and fully validate candidates without saving persistent LKG.' || return 1
+
+    configure_luci_command \
+        podkop_guard_refresh \
+        'Podkop Guard: Refresh LKG' \
+        '/usr/bin/podkop-guard refresh' \
+        'Build, fully validate and save a new persistent LKG.' || return 1
+
+    uci commit luci || return 1
+    return 0
+}
+
+if [ "$luci_commands_ready" -eq 1 ]; then
+    if configure_luci_commands; then
+        info "Configured LuCI Custom Commands for podkop-guard."
+    else
+        warn "Could not configure LuCI Custom Commands; core podkop-guard installation will continue."
+        uci revert luci >/dev/null 2>&1 || true
+        luci_commands_ready=0
+    fi
+fi
+
 if [ "$existing_install" -eq 1 ]; then
     if [ "$was_enabled" -eq 1 ]; then
         "$INIT_DST" enable >/dev/null 2>&1 || fail "Failed to restore autostart state."
@@ -155,6 +235,15 @@ info "Installed ${TAG}."
 printf '\n'
 "$WORKER_DST" status || true
 printf '\n'
+
+if [ "$luci_present" -eq 1 ]; then
+    if [ "$luci_commands_ready" -eq 1 ]; then
+        printf 'LuCI integration: ENABLED (4 authenticated Custom Commands)\n'
+    else
+        printf 'LuCI integration: NOT CONFIGURED (core guard is unaffected)\n'
+    fi
+    printf '\n'
+fi
 
 if [ "$existing_install" -eq 1 ]; then
     printf 'Existing service state was preserved:\n'
