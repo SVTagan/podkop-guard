@@ -53,7 +53,7 @@ Most of the time the worker is sleeping. Heavier `jq` and `sing-box` operations 
 - `lkg-subnets.lst` — Podkop Local Subnet List containing only unconditional `ip_cidr` rules;
 - `cache.db` — validated sing-box remote rule-set cache for cold starts.
 
-The `cache.db` mtime is also the marker for the last fully successful refresh, so no separate timestamp file is required.
+The `cache.db` mtime is also the marker for the last fully successful refresh, so no separate timestamp file is required. The age is read with BusyBox `date -r FILE +%s`; a separate `stat`/coreutils package is not required.
 
 ## Refresh logic
 
@@ -63,7 +63,7 @@ For every current Community List, the worker downloads:
 https://github.com/itdoginfo/allow-domains/releases/latest/download/<list>.srs
 ```
 
-It first tries a normal `curl` with strict timeouts. If that fails and `podkop.main.connection_type='vpn'`, it retries once through the current `podkop.main.interface` using `curl --interface`.
+It first tries a normal `curl` with strict timeouts. If that fails and the main Podkop section is in VPN mode, it retries once through the current `podkop.main.interface` using `curl --interface`. For compatibility with Podkop UCI variants, both `podkop.main.connection_type` and `podkop.main.type` are understood.
 
 The refresh aborts immediately if any required SRS cannot be downloaded. Partial snapshots are never accepted.
 
@@ -112,7 +112,9 @@ Required components:
 - sing-box;
 - `curl`;
 - `jq`;
-- standard BusyBox tools including `nice`, `stat`, `sort`, `cmp`, and `logger`.
+- standard BusyBox tools including `nice`, `date` with `-r` support, `sort`, `cmp`, and `logger`.
+
+A separate `stat` utility is not required.
 
 The installer currently targets OpenWrt systems using `opkg`.
 
@@ -205,7 +207,7 @@ The current implementation focuses on `podkop.main.community_lists`.
 
 If Community Lists are changed while the current LKG is less than 24 hours old, run `podkop-guard refresh` manually rather than waiting for the next scheduled refresh.
 
-VPN download fallback is only used when `podkop.main.connection_type='vpn'` and `podkop.main.interface` is set.
+VPN download fallback is used when the main Podkop section is detected as VPN mode and `podkop.main.interface` is set.
 
 The `START=98 → Podkop START=99` boot order was verified for Podkop 0.7.21. Re-check init order after major Podkop upgrades.
 
