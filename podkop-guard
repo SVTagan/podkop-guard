@@ -3,7 +3,7 @@
 # podkop-guard - persistent Last Known Good protection for Podkop/OpenWrt
 # SPDX-License-Identifier: MIT
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 
 STATE_DIR="${PODKOP_GUARD_DIR:-/etc/podkop-guard}"
 LKG_SRS="$STATE_DIR/lkg.srs"
@@ -567,7 +567,7 @@ verify_lkg() {
         return 1
     }
 
-    json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX.json)" || return 1
+    json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX)" || return 1
 
     if ! run_nice sing-box rule-set decompile --output "$json" "$LKG_SRS" >/dev/null 2>&1; then
         rm -f "$json"
@@ -600,7 +600,7 @@ derive_subnets() {
         return 1
     }
 
-    json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX.json)" || return 1
+    json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX)" || return 1
     new="$STATE_DIR/.lkg-subnets.lst.new.$$"
     rc=1
 
