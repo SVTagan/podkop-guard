@@ -22,13 +22,88 @@ This is why subnet persistence is treated separately from sing-box remote rule-s
 - Prefer persistent LKG data over complex NORMAL/FALLBACK state machines.
 - Make writes atomic and avoid replacing a good LKG with partial/invalid data.
 - Do not silently flatten conditional sing-box rules into unconditional nft routes.
-- Keep recovery actions explicit until their behaviour has been proven on real hardware.
+- Keep recovery actions minimal and independently testable.
 
-## Current state — 0.1.0
+## Proven recovery behaviour
 
-The repository currently contains the conservative core helper only. It intentionally does **not** change UCI configuration or restart/reload Podkop.
+### Persistent Local Subnet LKG
 
-Commands:
+A full LKG snapshot built from 14 selected Community Lists contained:
+
+```text
+rules:   16
+domains: 1562
+cidrs:   1169
+```
+
+It was round-tripped through:
+
+```text
+JSON -> sing-box rule-set compile -> SRS -> decompile -> canonical JSON
+```
+
+The canonical JSON before and after the round-trip had identical SHA-256 hashes and `cmp` returned `IDENTICAL`.
+
+A plain Local Subnet List was then derived only from unconditional `ip_cidr` rules. Eight conditional Discord CIDRs were intentionally skipped, leaving:
+
+```text
+1161 CIDRs
+```
+
+The file was configured as:
+
+```text
+podkop.main.local_subnet_lists='/etc/podkop-guard/lkg-subnets.lst'
+```
+
+A real Podkop reload proved that Podkop imported the LKG before its asynchronous Community list update:
+
+```text
+Processing local subnets routing rules for 'main'
+Adding 1000 elements to ruleset ...
+Adding 161 elements to ruleset ...
+Adding 1161 elements to nft set podkop_subnets
+```
+
+Telegram CIDRs were present after the reload and the native Telegram client worked.
+
+### Persistent sing-box remote rule-set cache
+
+A saved `/tmp/sing-box/cache.db` was copied to persistent storage as `/etc/podkop-guard/cache.db`.
+
+A controlled A/B test used the real Telegram remote SRS while forcing its download detour to a dead SOCKS endpoint (`127.0.0.1:9`):
+
+```text
+A: saved cache + dead download -> sing-box remained running
+B: no cache + same dead download -> sing-box exited with FATAL initial rule-set error
+```
+
+The same test was then repeated with **all 14 currently configured remote Community rule-sets**. With the saved cache and every network download forced through the dead detour, sing-box started successfully and remained running. No remote download was required.
+
+This proves that the saved cache can satisfy the current remote Community SRS set during a cold start when GitHub is unavailable.
+
+## Current architecture
+
+Persistent state:
+
+```text
+/etc/podkop-guard/lkg.srs
+/etc/podkop-guard/lkg-subnets.lst
+/etc/podkop-guard/cache.db
+```
+
+Normal operation remains owned by Podkop. `podkop-guard` adds only two safety nets:
+
+1. `lkg-subnets.lst` is configured once as a normal Podkop Local Subnet List, so known-good IP CIDRs are loaded into `podkop_subnets` on every start/reload even if Community subnet downloads fail.
+2. A tiny OpenWrt init script restores the saved sing-box `cache.db` into `/tmp/sing-box/cache.db` before Podkop starts, so cached remote Community SRS can be used after a power loss.
+
+Podkop 0.7.21 starts at `START=99`; the guard init script uses `START=98`.
+
+There is intentionally no NORMAL/FALLBACK mode, no automatic mutation of `community_lists`, no Podkop patch, and no custom HTTP server.
+
+## Helper commands
+
+The repository contains a conservative helper script with these commands:
 
 ```text
 podkop-guard status
@@ -50,7 +125,7 @@ Files:
 
 - `lkg.srs` — canonical full sing-box ruleset snapshot;
 - `lkg-subnets.lst` — derived plain CIDR list containing only **unconditional** `ip_cidr` rules;
-- `cache.db` — optional manual snapshot of the sing-box cache.
+- `cache.db` — saved sing-box remote rule-set cache snapshot.
 
 ### Conditional rules
 
@@ -60,31 +135,11 @@ A Podkop Local Subnet List can only express plain IP/CIDR entries. It cannot pre
 
 This matters for the current `discord.srs`, whose IP rules contain UDP/port restrictions.
 
-## Proven LKG experiment
+## Remaining work
 
-A snapshot built from 14 Community Lists was merged into one binary `lkg.srs` and round-tripped:
+1. Install and verify the `START=98` cache-restore init script on the target router.
+2. Perform a controlled boot-sequence simulation: stop Podkop, remove the volatile cache, run the guard restore, verify the restored cache, then start Podkop.
+3. Decide how and when a newer cache snapshot and `lkg.srs` should replace the persistent LKG. Refresh must be transactional and must never replace a known-good snapshot with an incomplete one.
+4. Add installation/update packaging after the minimal mechanism is proven over real power-loss events.
 
-```text
-JSON -> sing-box rule-set compile -> SRS -> decompile -> canonical JSON
-```
-
-The canonical JSON before and after the round-trip had identical SHA-256 hashes and `cmp` returned `IDENTICAL`.
-
-The snapshot contained:
-
-```text
-rules:   16
-domains: 1562
-cidrs:   1169
-```
-
-and preserved `domain_suffix`, `ip_cidr`, `network`, and `port_range` fields.
-
-## Next work
-
-1. Install and test the derived local subnet LKG with Podkop's existing `local_subnet_lists` option.
-2. Test whether a saved sing-box `cache.db` can satisfy a remote Community SRS on cold start while its network download path is deliberately unavailable.
-3. Only after that test, decide whether cache persistence should use Podkop's built-in flash cache path or a small boot-time restore mechanism.
-4. Add snapshot refresh/update automation after the failure behaviour is fully verified.
-
-The intended end state is deliberately small: Podkop remains responsible for normal routing and list updates; `podkop-guard` only preserves a known-good local safety net.
+The intended end state remains deliberately small: Podkop owns routing and normal list updates; `podkop-guard` only preserves a known-good local safety net.
