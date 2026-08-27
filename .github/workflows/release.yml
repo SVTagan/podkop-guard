@@ -115,7 +115,7 @@ jobs:
           {
             echo "# podkop-guard ${RELEASE_TAG}"
             echo
-            echo "Первый публичный GitHub Release проекта podkop-guard — небольшой helper для повышения отказоустойчивости Podkop/OpenWrt с проверенным Last Known Good snapshot Community Lists и восстановлением sing-box cache перед запуском Podkop после reboot/power loss."
+            echo "GitHub Release проекта podkop-guard — небольшого helper для повышения отказоустойчивости Podkop/OpenWrt с проверенным Last Known Good snapshot Community Lists и восстановлением sing-box cache перед запуском Podkop после reboot/power loss."
             echo
             if [[ "${VERSION}" == "0.2.2" ]]; then
               echo "Версия 0.2.2 проверена на реальном **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22**. Проверены настоящий reboot/cold-start, offline cache validation, Local Subnet LKG, periodic worker, LuCI Custom Commands и повторная установка без изменения persistent LKG."
