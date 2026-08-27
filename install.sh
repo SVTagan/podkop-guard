@@ -72,9 +72,14 @@ if ! pkg_installed jq; then
     opkg install jq || fail "jq installation failed."
 fi
 
-for cmd in logger nice sort cmp stat date mktemp grep tail touch sync; do
+for cmd in logger nice sort cmp date mktemp grep tail touch sync; do
     command -v "$cmd" >/dev/null 2>&1 || fail "$cmd is required."
 done
+
+# BusyBox date -r is used to read the mtime of the last successful cache
+# snapshot. This avoids depending on a separate GNU/coreutils stat package.
+date -r /etc/openwrt_release +%s >/dev/null 2>&1 || \
+    fail "date must support '-r FILE +%s' to read file modification time."
 
 command -v sing-box >/dev/null 2>&1 || fail "sing-box is required. Install Podkop/sing-box first."
 if ! command -v podkop >/dev/null 2>&1 && [ ! -x /usr/bin/podkop ]; then
