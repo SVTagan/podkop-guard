@@ -1,0 +1,50 @@
+#!/bin/sh /etc/rc.common
+
+# Restore a known-good sing-box remote rule-set cache before Podkop starts.
+# Podkop 0.7.21 starts at START=99, so this service runs immediately before it.
+
+START=98
+STOP=01
+
+STATE_DIR="/etc/podkop-guard"
+CACHE_LKG="$STATE_DIR/cache.db"
+CACHE_RUNTIME="/tmp/sing-box/cache.db"
+EXPECTED_CACHE_PATH="/tmp/sing-box/cache.db"
+
+log() {
+    logger -t podkop-guard "$*"
+}
+
+start() {
+    local configured_cache_path
+    configured_cache_path="$(uci -q get podkop.settings.cache_path 2>/dev/null)"
+    [ -n "$configured_cache_path" ] || configured_cache_path="$EXPECTED_CACHE_PATH"
+
+    if [ "$configured_cache_path" != "$EXPECTED_CACHE_PATH" ]; then
+        log "cache restore skipped: Podkop cache_path is $configured_cache_path, expected $EXPECTED_CACHE_PATH"
+        return 0
+    fi
+
+    if [ ! -s "$CACHE_LKG" ]; then
+        log "cache restore skipped: persistent snapshot missing or empty: $CACHE_LKG"
+        return 0
+    fi
+
+    if pidof sing-box >/dev/null 2>&1; then
+        log "cache restore skipped: sing-box is already running"
+        return 0
+    fi
+
+    mkdir -p /tmp/sing-box || {
+        log "cache restore failed: cannot create /tmp/sing-box"
+        return 1
+    }
+
+    cp "$CACHE_LKG" "$CACHE_RUNTIME" || {
+        log "cache restore failed: cannot copy $CACHE_LKG to $CACHE_RUNTIME"
+        return 1
+    }
+
+    chmod 0600 "$CACHE_RUNTIME"
+    log "restored persistent sing-box cache snapshot before Podkop startup"
+}
