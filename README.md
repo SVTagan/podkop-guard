@@ -84,6 +84,33 @@ A separate stale-cache test forced every cached remote rule-set to expire immedi
 
 This proves that the saved cache can satisfy the current remote Community SRS set during a cold start when GitHub is unavailable, even if the cached entries are older than their configured refresh interval.
 
+### Boot restore simulation
+
+The OpenWrt init script was installed as:
+
+```text
+/etc/rc.d/S98podkop-guard -> ../init.d/podkop-guard
+/etc/rc.d/S99podkop       -> ../init.d/podkop
+```
+
+A controlled power-loss simulation was then performed without rebooting the router:
+
+1. Podkop was stopped and sing-box confirmed stopped.
+2. `/tmp/sing-box/cache.db` was deleted to emulate volatile RAM loss.
+3. `podkop-guard start` restored the persistent snapshot.
+4. SHA-256 of the restored runtime cache exactly matched `/etc/podkop-guard/cache.db`.
+5. Podkop was started again.
+6. The Local Subnet LKG was rebuilt into Podkop's local ruleset and nft set.
+7. Telegram, YouTube and Gemini all worked after startup.
+
+Observed restore log:
+
+```text
+podkop-guard: restored persistent sing-box cache snapshot before Podkop startup
+```
+
+One operational detail: `/etc/init.d/podkop start` returns after handing the service to procd, while `/usr/bin/podkop start` continues building its configuration. With a 1161-entry Local Subnet LKG, the first 12-second status check occurred before sing-box had started. This was not a startup failure; the subsequent working services confirmed completion. Startup checks should therefore allow more time or inspect Podkop logs instead of assuming that an immediate empty `pgrep` means failure.
+
 ## Current architecture
 
 Persistent state:
@@ -139,9 +166,11 @@ This matters for the current `discord.srs`, whose IP rules contain UDP/port rest
 
 ## Remaining work
 
-1. Install and verify the `START=98` cache-restore init script on the target router.
-2. Perform a controlled boot-sequence simulation: stop Podkop, remove the volatile cache, run the guard restore, verify the restored cache, then start Podkop.
-3. Decide how and when a newer cache snapshot and `lkg.srs` should replace the persistent LKG. Refresh must be transactional and must never replace a known-good snapshot with an incomplete one.
-4. Add installation/update packaging after the minimal mechanism is proven over real power-loss events.
+The minimal recovery mechanism is now proven on the target router. Remaining work is operational rather than emergency recovery:
+
+1. Decide how and when a newer cache snapshot and `lkg.srs` should replace the persistent LKG. Refresh must be transactional and must never replace a known-good snapshot with an incomplete one.
+2. Add an installation/update path so the project can be deployed and upgraded reproducibly from the repository.
+3. Observe real power-loss events and confirm the same recovery behaviour outside controlled tests.
+4. Revisit special conditional rules such as Discord only if support for them is actually needed.
 
 The intended end state remains deliberately small: Podkop owns routing and normal list updates; `podkop-guard` only preserves a known-good local safety net.
