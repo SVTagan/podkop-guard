@@ -2,7 +2,7 @@
 
 ## 0.2.1 — 2026-08-27
 
-Исправления совместимости после первого запуска v0.2 на реальном OpenWrt.
+Исправления совместимости после первого запуска v0.2 на реальном OpenWrt и завершение полной проверки на целевом роутере.
 
 - Убрана зависимость от отдельной утилиты `stat`: на целевом Cudy TR3000/OpenWrt 24.10.5 её нет в базовой системе.
 - Возраст LKG теперь определяется штатным BusyBox `date -r FILE +%s`, который проверен на целевом роутере.
@@ -10,6 +10,11 @@
 - Определение VPN-режима для fallback-download теперь понимает как `podkop.main.connection_type`, так и `podkop.main.type`, чтобы не зависеть от варианта UCI-схемы Podkop.
 - Offline cache test использует большой `update_interval`, чтобы проверять именно возможность холодного старта из cache, а не создавать лишний цикл background refresh.
 - Добавлена защита от принятия пустого `lkg-subnets.lst` в текущем сценарии использования.
+- `refresh-test` полностью пройден на Cudy TR3000 v1: все 14 Community SRS скачаны и проверены, объединённый LKG прошёл compile/decompile round-trip, получен список из 1161 безусловного CIDR, 8 conditional CIDR корректно пропущены.
+- Полный `refresh-test` занял около 15 секунд; SHA-256 всех трёх persistent LKG-файлов до и после теста совпали, что подтвердило отсутствие записи в persistent state.
+- Выполнена установка поверх экспериментального v0.1 без удаления существующего LKG; состояние сервиса и автозапуска сохранено.
+- Выполнен настоящий reboot OpenWrt. В boot log подтверждён порядок: `podkop-guard` восстановил persistent `cache.db` в `/tmp` на `START=98`, после чего Podkop начал запуск на `START=99`.
+- После reboot procd-daemon `podkop-guard` работает, sing-box runtime имеет состояние `ready`, Local Subnet LKG загружен в `PodkopTable/podkop_subnets`; Telegram, YouTube и Gemini работают.
 
 ## 0.2.0 — 2026-08-27
 
