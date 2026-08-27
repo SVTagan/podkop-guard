@@ -23,7 +23,7 @@ The full pipeline has been validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.
 - the full `refresh-test` took about 15 seconds and did not change the SHA-256 of any persistent LKG file;
 - a real OpenWrt reboot was performed: `podkop-guard` at `START=98` restored the cache before Podkop started at `START=99`;
 - after reboot, sing-box runtime came up, LKG subnets were loaded into nftables, and the tested routed services remained functional;
-- `status` and `refresh-test` were also exercised through LuCI Custom Commands; v0.2.2 fixes BusyBox `mktemp` compatibility for `verify-lkg` and `derive-subnets`.
+- `status`, `verify-lkg`, and `refresh-test` were exercised through LuCI Custom Commands; v0.2.2 fixes BusyBox `mktemp` compatibility for `verify-lkg` and `derive-subnets`.
 
 This validates the specific tested configuration; it is not a guarantee of compatibility with every OpenWrt, Podkop, or sing-box version.
 
@@ -106,15 +106,13 @@ offline cold-start test with an intentionally dead download path
 only then commit to flash
 ```
 
-The cache validation launches a separate test sing-box with all expected current Community rule-sets configured as remote while their download detour points to dead SOCKS `127.0.0.1:9`. If the candidate cache is complete, the test process starts. If a required remote SRS is missing, validation fails and the old persistent LKG remains untouched.
+The cache validation launches a separate test sing-box with all expected current Community rule-sets configured as remote while their download detour points to dead SOCKS `127.0.0.1:9`.
 
 ## Conditional CIDRs
 
-A plain Podkop Local Subnet List cannot represent conditions such as `network` or `port_range`.
+A plain Podkop Local Subnet List cannot represent conditions such as `network` or `port_range`. Therefore only `ip_cidr` values from unconditional rules are exported. Conditional CIDRs are skipped with a warning instead of being silently broadened.
 
-Therefore only `ip_cidr` values from unconditional rules are exported. Conditional CIDRs are skipped with a warning instead of being silently broadened.
-
-## Requirements
+## Requirements and dependencies
 
 Tested on:
 
@@ -129,11 +127,21 @@ Required components:
 - sing-box;
 - `curl`;
 - `jq`;
-- standard BusyBox tools including `nice`, `date` with `-r` support, `sort`, `cmp`, `logger`, and `mktemp`.
+- standard BusyBox tools: `nice`, `date` with `-r` support, `sort`, `cmp`, `logger`, `mktemp`, `grep`, `tail`, `touch`, `sync`.
 
-A separate `stat` utility is not required.
+The installer targets OpenWrt systems using `opkg`. Missing `curl` or `jq` packages are installed automatically. A separate `stat` utility is not required.
 
-The installer currently targets OpenWrt systems using `opkg`.
+### LuCI
+
+LuCI integration is intentionally an **optional dependency** of the core guard:
+
+- when `luci-base` is present, the installer checks for `luci-app-commands` and attempts to install it through `opkg` when missing;
+- it then creates four named Custom Commands automatically;
+- if `luci-app-commands` is unavailable from the configured feeds or installation fails, the core `podkop-guard` installation continues with a warning;
+- on headless OpenWrt without LuCI, no LuCI packages are pulled in;
+- uninstall removes only the four `podkop-guard` UCI sections and deliberately keeps `luci-app-commands`, because other custom commands may depend on it.
+
+This keeps the recovery mechanism independent from the web UI.
 
 ## Installation
 
@@ -152,7 +160,7 @@ podkop-guard refresh-test
 podkop-guard refresh
 ```
 
-Then configure the generated file once as a Podkop Local Subnet List:
+Then configure the generated Local Subnet List once:
 
 ```sh
 if ! uci -q get podkop.main.local_subnet_lists 2>/dev/null \
@@ -170,14 +178,12 @@ Reload Podkop once:
 /etc/init.d/podkop reload
 ```
 
-After verifying the routed services, enable the guard:
+After verifying routed services, enable the guard:
 
 ```sh
 /etc/init.d/podkop-guard enable
 /etc/init.d/podkop-guard start
 ```
-
-Starting the guard on an already running system will not overwrite live cache: boot restore is skipped when sing-box is running, while the periodic worker begins its normal startup grace.
 
 ## CLI
 
@@ -194,39 +200,20 @@ podkop-guard version
 
 `daemon` is intended for procd and normally should not be started manually.
 
-## Optional LuCI Custom Commands
+## LuCI Custom Commands
 
-If `luci-app-commands` is installed, four authenticated commands can be added for convenient day-to-day checks:
+On a normal installation on a router with LuCI, the installer automatically creates:
 
-```sh
-uci set luci.podkop_guard_status='command'
-uci set luci.podkop_guard_status.name='Podkop Guard: Status'
-uci set luci.podkop_guard_status.command='/usr/bin/podkop-guard status'
-uci set luci.podkop_guard_status.param='0'
-uci set luci.podkop_guard_status.public='0'
-
-uci set luci.podkop_guard_verify='command'
-uci set luci.podkop_guard_verify.name='Podkop Guard: Verify LKG'
-uci set luci.podkop_guard_verify.command='/usr/bin/podkop-guard verify-lkg'
-uci set luci.podkop_guard_verify.param='0'
-uci set luci.podkop_guard_verify.public='0'
-
-uci set luci.podkop_guard_test='command'
-uci set luci.podkop_guard_test.name='Podkop Guard: Refresh Test'
-uci set luci.podkop_guard_test.command='/usr/bin/podkop-guard refresh-test'
-uci set luci.podkop_guard_test.param='0'
-uci set luci.podkop_guard_test.public='0'
-
-uci set luci.podkop_guard_refresh='command'
-uci set luci.podkop_guard_refresh.name='Podkop Guard: Refresh LKG'
-uci set luci.podkop_guard_refresh.command='/usr/bin/podkop-guard refresh'
-uci set luci.podkop_guard_refresh.param='0'
-uci set luci.podkop_guard_refresh.public='0'
-
-uci commit luci
+```text
+Podkop Guard: Status       → /usr/bin/podkop-guard status
+Podkop Guard: Verify LKG   → /usr/bin/podkop-guard verify-lkg
+Podkop Guard: Refresh Test → /usr/bin/podkop-guard refresh-test
+Podkop Guard: Refresh LKG  → /usr/bin/podkop-guard refresh
 ```
 
-`Refresh Test` performs the full pipeline without writing persistent LKG state. `Refresh LKG` does update the persistent snapshot after validation. `param=0` disables arbitrary additional arguments and `public=0` prevents unauthenticated execution.
+Stable named sections (`podkop_guard_*`) make the operation idempotent, so running the installer again updates the same entries instead of creating duplicates. `param=0` and `public=0` are enforced on every install: arbitrary extra arguments are disabled and unauthenticated execution is not allowed. A user-customized `description`, if already present, is preserved on upgrades.
+
+`Refresh Test` performs the full pipeline without writing persistent LKG state. `Refresh LKG` does update the persistent snapshot after successful validation.
 
 ## Logs
 
