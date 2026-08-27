@@ -203,7 +203,6 @@ if [ "$luci_commands_ready" -eq 1 ]; then
         info "Configured LuCI Custom Commands for podkop-guard."
     else
         warn "Could not configure LuCI Custom Commands; core podkop-guard installation will continue."
-        uci revert luci >/dev/null 2>&1 || true
         luci_commands_ready=0
     fi
 fi
