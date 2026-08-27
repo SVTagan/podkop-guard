@@ -1,0 +1,220 @@
+#!/bin/ash
+
+# podkop-guard - persistent Last Known Good helpers for Podkop/OpenWrt
+# SPDX-License-Identifier: MIT
+
+VERSION="0.1.0"
+STATE_DIR="${PODKOP_GUARD_DIR:-/etc/podkop-guard}"
+LKG_SRS="$STATE_DIR/lkg.srs"
+LKG_SUBNETS="$STATE_DIR/lkg-subnets.lst"
+CACHE_RUNTIME="/tmp/sing-box/cache.db"
+CACHE_LKG="$STATE_DIR/cache.db"
+
+log() {
+    printf '[podkop-guard] %s\n' "$*"
+}
+
+err() {
+    printf '[podkop-guard] ERROR: %s\n' "$*" >&2
+}
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || {
+        err "required command not found: $1"
+        exit 1
+    }
+}
+
+ensure_state_dir() {
+    mkdir -p "$STATE_DIR" || {
+        err "cannot create $STATE_DIR"
+        exit 1
+    }
+}
+
+verify_lkg() {
+    need jq
+    need sing-box
+
+    [ -s "$LKG_SRS" ] || {
+        err "LKG ruleset not found: $LKG_SRS"
+        return 1
+    }
+
+    local json
+    json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX.json)" || return 1
+
+    if ! sing-box rule-set decompile -o "$json" "$LKG_SRS" >/dev/null 2>&1; then
+        rm -f "$json"
+        err "cannot decompile $LKG_SRS"
+        return 1
+    fi
+
+    jq -r '
+      "version=" + (.version|tostring),
+      "rules=" + (.rules|length|tostring),
+      "domains=" + ([.rules[]? | .domain_suffix[]?]|length|tostring),
+      "cidrs=" + ([.rules[]? | .ip_cidr[]?]|length|tostring),
+      "special_rules=" + ([.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)]|length|tostring)
+    ' "$json"
+
+    rm -f "$json"
+}
+
+derive_subnets() {
+    need jq
+    need sing-box
+    need sort
+    ensure_state_dir
+
+    [ -s "$LKG_SRS" ] || {
+        err "LKG ruleset not found: $LKG_SRS"
+        return 1
+    }
+
+    local json new special_count skipped_cidrs count
+    json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX.json)" || return 1
+    new="$STATE_DIR/.lkg-subnets.lst.new.$$"
+
+    trap 'rm -f "$json" "$new"' EXIT INT TERM
+
+    if ! sing-box rule-set decompile -o "$json" "$LKG_SRS" >/dev/null 2>&1; then
+        err "cannot decompile $LKG_SRS"
+        return 1
+    fi
+
+    # A plain Podkop Local Subnet List cannot represent conditions such as
+    # network/port_range. Only unconditional ip_cidr rules are exported.
+    jq -r '
+      .rules[]?
+      | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) == 0)
+      | .ip_cidr[]?
+    ' "$json" | sort -u > "$new"
+
+    count="$(wc -l < "$new" | tr -d ' ')"
+    special_count="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)] | length' "$json")"
+    skipped_cidrs="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0) | .ip_cidr[]?] | length' "$json")"
+
+    if [ "$count" -eq 0 ]; then
+        err "derived subnet list is empty; refusing to replace current LKG"
+        return 1
+    fi
+
+    if [ -f "$LKG_SUBNETS" ] && cmp -s "$new" "$LKG_SUBNETS"; then
+        rm -f "$new"
+        log "subnet LKG unchanged ($count CIDRs)"
+    else
+        mv "$new" "$LKG_SUBNETS" || return 1
+        chmod 0644 "$LKG_SUBNETS"
+        log "updated $LKG_SUBNETS ($count CIDRs)"
+    fi
+
+    if [ "$special_count" -gt 0 ]; then
+        log "warning: skipped $skipped_cidrs CIDRs from $special_count conditional rule(s)"
+        jq -r '
+          .rules[]?
+          | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)
+          | "  special keys: " + ((keys_unsorted - ["domain_suffix","ip_cidr"])|join(",")) + "; cidrs=" + ((.ip_cidr // [])|length|tostring)
+        ' "$json"
+    fi
+
+    rm -f "$json"
+    trap - EXIT INT TERM
+}
+
+cache_save() {
+    ensure_state_dir
+
+    [ -s "$CACHE_RUNTIME" ] || {
+        err "runtime cache not found: $CACHE_RUNTIME"
+        return 1
+    }
+
+    local new
+    new="$STATE_DIR/.cache.db.new.$$"
+    trap 'rm -f "$new"' EXIT INT TERM
+
+    cp "$CACHE_RUNTIME" "$new" || return 1
+
+    if [ -f "$CACHE_LKG" ] && cmp -s "$new" "$CACHE_LKG"; then
+        rm -f "$new"
+        log "cache snapshot unchanged"
+    else
+        mv "$new" "$CACHE_LKG" || return 1
+        chmod 0600 "$CACHE_LKG"
+        log "saved cache snapshot to $CACHE_LKG"
+    fi
+
+    trap - EXIT INT TERM
+}
+
+cache_restore() {
+    [ -s "$CACHE_LKG" ] || {
+        err "persistent cache snapshot not found: $CACHE_LKG"
+        return 1
+    }
+
+    if pidof sing-box >/dev/null 2>&1; then
+        err "sing-box is running; refusing to overwrite its live cache"
+        return 1
+    fi
+
+    mkdir -p /tmp/sing-box || return 1
+    cp "$CACHE_LKG" "$CACHE_RUNTIME" || return 1
+    chmod 0600 "$CACHE_RUNTIME"
+    log "restored cache snapshot to $CACHE_RUNTIME"
+}
+
+status() {
+    printf 'podkop-guard %s\n' "$VERSION"
+    printf 'state_dir=%s\n' "$STATE_DIR"
+    printf 'podkop_cache_path=%s\n' "$(uci -q get podkop.settings.cache_path 2>/dev/null || echo unknown)"
+    printf 'local_subnet_lists:\n'
+    uci -q show podkop.main.local_subnet_lists 2>/dev/null || printf '  (none)\n'
+
+    if [ -s "$LKG_SRS" ]; then
+        printf 'lkg_srs=%s bytes\n' "$(wc -c < "$LKG_SRS" | tr -d ' ')"
+    else
+        printf 'lkg_srs=missing\n'
+    fi
+
+    if [ -s "$LKG_SUBNETS" ]; then
+        printf 'lkg_subnets=%s entries\n' "$(wc -l < "$LKG_SUBNETS" | tr -d ' ')"
+    else
+        printf 'lkg_subnets=missing\n'
+    fi
+
+    if [ -s "$CACHE_LKG" ]; then
+        printf 'cache_snapshot=%s bytes\n' "$(wc -c < "$CACHE_LKG" | tr -d ' ')"
+    else
+        printf 'cache_snapshot=missing\n'
+    fi
+}
+
+usage() {
+    cat <<'EOF'
+Usage: podkop-guard <command>
+
+Commands:
+  status          Show current guard state
+  verify-lkg      Inspect the persistent LKG SRS
+  derive-subnets  Build a plain Local Subnet List from unconditional LKG CIDRs
+  cache-save      Save the current sing-box cache to persistent storage
+  cache-restore   Restore saved cache only while sing-box is stopped
+  version         Print version
+
+This version intentionally does not modify Podkop UCI configuration and does
+not reload/restart Podkop. Configuration changes remain explicit user actions.
+EOF
+}
+
+case "${1:-}" in
+    status) status ;;
+    verify-lkg) verify_lkg ;;
+    derive-subnets) derive_subnets ;;
+    cache-save) cache_save ;;
+    cache-restore) cache_restore ;;
+    version|--version|-V) echo "$VERSION" ;;
+    help|--help|-h|"") usage ;;
+    *) err "unknown command: $1"; usage >&2; exit 2 ;;
+esac
