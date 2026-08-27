@@ -23,7 +23,7 @@
 - `refresh-test` занял около 15 секунд и не изменил SHA-256 persistent LKG-файлов;
 - выполнен настоящий reboot OpenWrt: `podkop-guard` на `START=98` восстановил cache до запуска Podkop на `START=99`;
 - после reboot sing-box runtime поднялся, LKG-подсети загрузились в nftables, проверенные сервисы продолжили работать;
-- `status` и `refresh-test` проверены через LuCI `Custom Commands`; в v0.2.2 исправлена совместимость `verify-lkg`/`derive-subnets` с BusyBox `mktemp`.
+- `status`, `verify-lkg` и `refresh-test` проверены через LuCI `Custom Commands`; в v0.2.2 исправлена совместимость `verify-lkg`/`derive-subnets` с BusyBox `mktemp`.
 
 Это подтверждение конкретной протестированной конфигурации, а не гарантия совместимости со всеми версиями OpenWrt, Podkop и sing-box.
 
@@ -51,7 +51,7 @@ Init-сервис запускается с `START=98`, то есть непос
 
 ### 2. Периодическое безопасное обновление LKG
 
-После загрузки тот же сервис запускает очень лёгкий procd-worker:
+После загрузки тот же сервис запускает лёгкий procd-worker:
 
 - startup grace: 300 секунд;
 - проверка состояния: раз в 1 час;
@@ -76,13 +76,7 @@ Init-сервис запускается с `START=98`, то есть непос
 
 ## Как обновляется LKG
 
-При refresh `podkop-guard` читает текущий список:
-
-```text
-podkop.main.community_lists
-```
-
-И для каждого Community List скачивает SRS из GitHub Releases:
+При refresh `podkop-guard` читает текущий список `podkop.main.community_lists` и для каждого Community List скачивает:
 
 ```text
 https://github.com/itdoginfo/allow-domains/releases/latest/download/<list>.srs
@@ -92,9 +86,7 @@ https://github.com/itdoginfo/allow-domains/releases/latest/download/<list>.srs
 
 Если хотя бы один обязательный SRS получить не удалось, refresh немедленно прекращается. Частичный snapshot никогда не принимается.
 
-## Проверки перед заменой LKG
-
-Новый snapshot должен пройти все этапы:
+Перед заменой persistent LKG должны пройти все этапы:
 
 ```text
 скачаны ВСЕ текущие Community SRS
@@ -118,25 +110,11 @@ offline cold-start test с намеренно мёртвым download path
 
 Для cache test создаётся отдельный тестовый sing-box. Все текущие Community rule-set помечаются как remote, но их download detour направляется в заведомо мёртвый SOCKS `127.0.0.1:9`.
 
-Если cache содержит всё необходимое, тестовый sing-box стартует. Если хотя бы одного обязательного remote SRS в cache нет, тест падает и persistent LKG не заменяется.
-
-Тестовый процесс живёт только до появления `sing-box started` и обычно завершается примерно через секунду; максимальный timeout — 10 секунд.
-
 ## Conditional CIDR
 
-Обычный Local Subnet List Podkop умеет хранить только IP/CIDR и не может сохранить условия вроде `network` или `port_range`.
+Обычный Local Subnet List Podkop умеет хранить только IP/CIDR и не может сохранить условия вроде `network` или `port_range`. Поэтому `podkop-guard` экспортирует только `ip_cidr` из правил без дополнительных условий. Conditional CIDR пропускаются с warning, а не превращаются молча в более широкий маршрут.
 
-Поэтому `podkop-guard` экспортирует в `lkg-subnets.lst` только `ip_cidr` из правил, у которых нет дополнительных условий. Conditional CIDR пропускаются с warning, а не превращаются молча в более широкий маршрут.
-
-Это важно, например, для текущего `discord.srs`.
-
-## Почему не используется live cache на flash
-
-Podkop/sing-box продолжает работать со штатным cache в `/tmp`. На flash сохраняется только периодический проверенный snapshot.
-
-Так нет постоянных записей FakeIP/cache на flash и нет необходимости менять штатную конфигурацию sing-box.
-
-## Требования
+## Требования и зависимости
 
 Проверено на:
 
@@ -145,17 +123,27 @@ Podkop/sing-box продолжает работать со штатным cache 
 - Podkop 0.7.21;
 - sing-box 1.12.22.
 
-Нужны:
+Обязательные компоненты:
 
 - Podkop;
 - sing-box;
 - `curl`;
 - `jq`;
-- стандартные BusyBox-утилиты, включая `nice`, `date` с поддержкой `-r`, `sort`, `cmp`, `logger`, `mktemp`.
+- стандартные BusyBox-утилиты: `nice`, `date` с поддержкой `-r`, `sort`, `cmp`, `logger`, `mktemp`, `grep`, `tail`, `touch`, `sync`.
 
-Отдельная утилита `stat` не требуется.
+Установщик рассчитан на OpenWrt с `opkg`. Если `curl` или `jq` отсутствуют, установщик ставит их автоматически. Отдельная утилита `stat` не требуется.
 
-Установщик рассчитан на OpenWrt с `opkg`.
+### LuCI
+
+LuCI-интеграция намеренно является **необязательной зависимостью** ядра guard:
+
+- если на роутере установлен `luci-base`, установщик проверяет `luci-app-commands` и при необходимости пытается установить его через `opkg`;
+- после этого автоматически создаются четыре именованные Custom Commands;
+- если `luci-app-commands` недоступен в feed или его установка завершилась ошибкой, установка основного `podkop-guard` продолжается с warning;
+- на headless OpenWrt без LuCI никакие LuCI-пакеты принудительно не устанавливаются;
+- при удалении `podkop-guard` удаляются только его четыре UCI-секции, но сам `luci-app-commands` не удаляется, потому что он может использоваться другими командами.
+
+Таким образом LuCI не является hard dependency для механизма восстановления.
 
 ## Установка
 
@@ -183,23 +171,10 @@ sh /tmp/podkop-guard-install.sh
 
 ```sh
 podkop-guard refresh-test
-```
-
-Это выполняет полный download/compile/cache cold-start test, но ничего не меняет в `/etc/podkop-guard`.
-
-Если тест прошёл:
-
-```sh
 podkop-guard refresh
 ```
 
-После этого должен существовать:
-
-```text
-/etc/podkop-guard/lkg-subnets.lst
-```
-
-Один раз подключите его к секции `main` как обычный Local Subnet List:
+После этого один раз подключите созданный файл к секции `main` как обычный Local Subnet List:
 
 ```sh
 if ! uci -q get podkop.main.local_subnet_lists 2>/dev/null \
@@ -224,8 +199,6 @@ fi
 /etc/init.d/podkop-guard start
 ```
 
-Запуск guard на уже работающей системе не перезапишет live cache: boot-restore увидит работающий sing-box и будет пропущен, а procd-worker начнёт обычный 300-секундный grace period.
-
 ## CLI
 
 ```text
@@ -241,43 +214,22 @@ podkop-guard version
 
 `daemon` предназначен для procd и вручную обычно не нужен.
 
-## LuCI Custom Commands (необязательно)
+## LuCI Custom Commands
 
-Если установлен `luci-app-commands`, можно добавить четыре безопасных кнопки для повседневной проверки:
+При обычной установке на роутер с LuCI установщик автоматически создаёт:
 
-```sh
-uci set luci.podkop_guard_status='command'
-uci set luci.podkop_guard_status.name='Podkop Guard: Status'
-uci set luci.podkop_guard_status.command='/usr/bin/podkop-guard status'
-uci set luci.podkop_guard_status.param='0'
-uci set luci.podkop_guard_status.public='0'
-
-uci set luci.podkop_guard_verify='command'
-uci set luci.podkop_guard_verify.name='Podkop Guard: Verify LKG'
-uci set luci.podkop_guard_verify.command='/usr/bin/podkop-guard verify-lkg'
-uci set luci.podkop_guard_verify.param='0'
-uci set luci.podkop_guard_verify.public='0'
-
-uci set luci.podkop_guard_test='command'
-uci set luci.podkop_guard_test.name='Podkop Guard: Refresh Test'
-uci set luci.podkop_guard_test.command='/usr/bin/podkop-guard refresh-test'
-uci set luci.podkop_guard_test.param='0'
-uci set luci.podkop_guard_test.public='0'
-
-uci set luci.podkop_guard_refresh='command'
-uci set luci.podkop_guard_refresh.name='Podkop Guard: Refresh LKG'
-uci set luci.podkop_guard_refresh.command='/usr/bin/podkop-guard refresh'
-uci set luci.podkop_guard_refresh.param='0'
-uci set luci.podkop_guard_refresh.public='0'
-
-uci commit luci
+```text
+Podkop Guard: Status       → /usr/bin/podkop-guard status
+Podkop Guard: Verify LKG   → /usr/bin/podkop-guard verify-lkg
+Podkop Guard: Refresh Test → /usr/bin/podkop-guard refresh-test
+Podkop Guard: Refresh LKG  → /usr/bin/podkop-guard refresh
 ```
 
-`Refresh Test` выполняет полный pipeline без записи persistent LKG. `Refresh LKG` после успешной валидации действительно обновляет persistent snapshot. `param=0` запрещает произвольные дополнительные аргументы, `public=0` не разрешает запуск команды без авторизации в LuCI.
+Секции имеют стабильные имена `podkop_guard_*`, поэтому повторный запуск установщика обновляет их без создания дубликатов. Для всех команд принудительно задаются `param=0` и `public=0`: произвольные дополнительные аргументы запрещены, запуск без авторизации в LuCI запрещён. Пользовательское `description`, если оно уже задано, при обновлении сохраняется.
+
+`Refresh Test` выполняет полный pipeline без записи persistent LKG. `Refresh LKG` после успешной валидации действительно обновляет persistent snapshot.
 
 ## Логи
-
-Worker пишет события в системный log OpenWrt:
 
 ```sh
 logread | grep podkop-guard
@@ -301,7 +253,7 @@ logread | grep podkop-guard
 
 - не патчит Podkop;
 - не меняет `community_lists`;
-- не включает `download_lists_via_proxy`;
+- не включает Podkop `download_lists_via_proxy`;
 - не переключает VPN;
 - не делает reload/restart Podkop во время refresh;
 - не использует cron;
