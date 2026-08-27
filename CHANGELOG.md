@@ -19,6 +19,7 @@
 - SHA-256 `lkg.srs`, `lkg-subnets.lst` и `cache.db` до и после повторной установки совпали; persistent LKG не изменён.
 - Состояние сервиса сохранено: `RUNNING`, автозапуск `ENABLED`, procd-daemon продолжил работу, `podkop_runtime=ready`, `refresh_due=no`.
 - После финальной повторной установки `podkop-guard verify-lkg` снова завершился с кодом `0`.
+- Добавлен ручной GitHub Actions workflow `Create release`, аналогичный используемому в `c0dx-theme`: он сверяет tag с версией worker, проверяет shell-синтаксис и согласованность README/CHANGELOG, формирует release notes из текущей секции changelog и создаёт неизменяемый GitHub Release только при отсутствии существующего tag/release.
 
 ## 0.2.1 — 2026-08-27
 
