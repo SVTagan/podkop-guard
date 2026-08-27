@@ -1,50 +1,573 @@
 #!/bin/ash
 
-# podkop-guard - persistent Last Known Good helpers for Podkop/OpenWrt
+# podkop-guard - persistent Last Known Good protection for Podkop/OpenWrt
 # SPDX-License-Identifier: MIT
 
-VERSION="0.1.0"
+VERSION="0.2.0"
+
 STATE_DIR="${PODKOP_GUARD_DIR:-/etc/podkop-guard}"
 LKG_SRS="$STATE_DIR/lkg.srs"
 LKG_SUBNETS="$STATE_DIR/lkg-subnets.lst"
-CACHE_RUNTIME="/tmp/sing-box/cache.db"
 CACHE_LKG="$STATE_DIR/cache.db"
+CACHE_RUNTIME="/tmp/sing-box/cache.db"
+EXPECTED_CACHE_PATH="/tmp/sing-box/cache.db"
+
+RELEASE_BASE="${PODKOP_GUARD_RELEASE_BASE:-https://github.com/itdoginfo/allow-domains/releases/latest/download}"
+STARTUP_GRACE="${PODKOP_GUARD_STARTUP_GRACE:-300}"
+CHECK_INTERVAL="${PODKOP_GUARD_CHECK_INTERVAL:-3600}"
+REFRESH_INTERVAL="${PODKOP_GUARD_REFRESH_INTERVAL:-86400}"
+CURL_CONNECT_TIMEOUT="${PODKOP_GUARD_CONNECT_TIMEOUT:-5}"
+CURL_MAX_TIME="${PODKOP_GUARD_MAX_TIME:-15}"
+NICE_LEVEL="${PODKOP_GUARD_NICE_LEVEL:-10}"
+CACHE_TEST_TIMEOUT="${PODKOP_GUARD_CACHE_TEST_TIMEOUT:-10}"
+
+UPDATE_LOCK="/tmp/podkop-guard-update.lock"
+UPDATE_WORK=""
+SYSLOG_MODE="${PODKOP_GUARD_SYSLOG:-0}"
+STOP_REQUESTED=0
 
 log() {
-    printf '[podkop-guard] %s\n' "$*"
+    if [ "$SYSLOG_MODE" = "1" ]; then
+        logger -t podkop-guard "$*"
+    else
+        printf '[podkop-guard] %s\n' "$*"
+    fi
+}
+
+warn() {
+    if [ "$SYSLOG_MODE" = "1" ]; then
+        logger -t podkop-guard "warning: $*"
+    else
+        printf '[podkop-guard] WARNING: %s\n' "$*" >&2
+    fi
 }
 
 err() {
-    printf '[podkop-guard] ERROR: %s\n' "$*" >&2
+    if [ "$SYSLOG_MODE" = "1" ]; then
+        logger -t podkop-guard "error: $*"
+    else
+        printf '[podkop-guard] ERROR: %s\n' "$*" >&2
+    fi
 }
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {
         err "required command not found: $1"
-        exit 1
+        return 1
     }
+}
+
+check_requirements() {
+    local cmd
+    for cmd in uci curl jq sing-box nice sort cmp stat date logger mktemp; do
+        need "$cmd" || return 1
+    done
+}
+
+run_nice() {
+    nice -n "$NICE_LEVEL" "$@"
 }
 
 ensure_state_dir() {
     mkdir -p "$STATE_DIR" || {
         err "cannot create $STATE_DIR"
-        exit 1
+        return 1
     }
 }
 
+configured_cache_path() {
+    local path
+    path="$(uci -q get podkop.settings.cache_path 2>/dev/null)"
+    [ -n "$path" ] || path="$EXPECTED_CACHE_PATH"
+    printf '%s\n' "$path"
+}
+
+community_lists() {
+    uci -q get podkop.main.community_lists 2>/dev/null
+}
+
+validate_tag() {
+    case "$1" in
+        ''|*[!A-Za-z0-9_.-]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+runtime_ready() {
+    pidof sing-box >/dev/null 2>&1 || return 1
+    [ -s "$CACHE_RUNTIME" ] || return 1
+    return 0
+}
+
+lkg_age() {
+    local now mtime
+
+    [ -s "$CACHE_LKG" ] || {
+        printf '%s\n' "$REFRESH_INTERVAL"
+        return 0
+    }
+
+    now="$(date +%s 2>/dev/null)" || return 1
+    mtime="$(stat -c %Y "$CACHE_LKG" 2>/dev/null)" || return 1
+
+    case "$now:$mtime" in
+        *[!0-9:]*|'':*) return 1 ;;
+    esac
+
+    if [ "$now" -le "$mtime" ]; then
+        printf '0\n'
+    else
+        printf '%s\n' "$((now - mtime))"
+    fi
+}
+
+refresh_due() {
+    local age
+    age="$(lkg_age)" || return 0
+    [ "$age" -ge "$REFRESH_INTERVAL" ]
+}
+
+acquire_update_lock() {
+    local old_pid
+
+    if mkdir "$UPDATE_LOCK" 2>/dev/null; then
+        printf '%s\n' "$$" > "$UPDATE_LOCK/pid"
+        return 0
+    fi
+
+    old_pid="$(cat "$UPDATE_LOCK/pid" 2>/dev/null)"
+    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+        err "another refresh is already running (pid $old_pid)"
+        return 1
+    fi
+
+    rm -rf "$UPDATE_LOCK"
+    if mkdir "$UPDATE_LOCK" 2>/dev/null; then
+        printf '%s\n' "$$" > "$UPDATE_LOCK/pid"
+        warn "removed stale refresh lock"
+        return 0
+    fi
+
+    err "cannot acquire refresh lock"
+    return 1
+}
+
+release_update_lock() {
+    rm -rf "$UPDATE_LOCK"
+}
+
+cleanup_update() {
+    [ -n "$UPDATE_WORK" ] && rm -rf "$UPDATE_WORK"
+    UPDATE_WORK=""
+    release_update_lock
+}
+
+download_srs() {
+    local tag output url connection_type interface curl_err
+
+    tag="$1"
+    output="$2"
+    url="$RELEASE_BASE/$tag.srs"
+    curl_err="$UPDATE_WORK/curl.err"
+
+    : > "$curl_err"
+    if curl -4 -fsSL \
+        --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        --max-time "$CURL_MAX_TIME" \
+        -o "$output" "$url" 2>"$curl_err" && [ -s "$output" ]; then
+        log "downloaded $tag.srs directly"
+        return 0
+    fi
+
+    rm -f "$output"
+    connection_type="$(uci -q get podkop.main.connection_type 2>/dev/null)"
+    interface="$(uci -q get podkop.main.interface 2>/dev/null)"
+
+    if [ "$connection_type" = "vpn" ] && [ -n "$interface" ]; then
+        warn "direct download failed for $tag.srs; retrying through $interface"
+        : > "$curl_err"
+        if curl -4 -fsSL \
+            --interface "$interface" \
+            --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            --max-time "$CURL_MAX_TIME" \
+            -o "$output" "$url" 2>"$curl_err" && [ -s "$output" ]; then
+            log "downloaded $tag.srs through $interface"
+            return 0
+        fi
+        rm -f "$output"
+    fi
+
+    err "cannot download required Community SRS: $tag"
+    return 1
+}
+
+validate_srs() {
+    local srs json
+    srs="$1"
+    json="$2"
+
+    if ! run_nice sing-box rule-set decompile --output "$json" "$srs" >/dev/null 2>&1; then
+        err "cannot decompile candidate SRS: $srs"
+        return 1
+    fi
+
+    if ! run_nice jq -e '.version and (.rules | type == "array")' "$json" >/dev/null 2>&1; then
+        err "invalid source structure after decompile: $srs"
+        return 1
+    fi
+
+    return 0
+}
+
+build_ruleset_candidate() {
+    local lists tag srs json count special_count skipped_cidrs
+    local combined canonical roundtrip roundtrip_canonical candidate_srs candidate_subnets
+
+    lists="$(community_lists)"
+    [ -n "$lists" ] || {
+        err "podkop.main.community_lists is empty"
+        return 1
+    }
+
+    mkdir -p "$UPDATE_WORK/srs" "$UPDATE_WORK/json" || return 1
+
+    for tag in $lists; do
+        validate_tag "$tag" || {
+            err "invalid Community List tag: $tag"
+            return 1
+        }
+
+        srs="$UPDATE_WORK/srs/$tag.srs"
+        json="$UPDATE_WORK/json/$tag.json"
+
+        download_srs "$tag" "$srs" || return 1
+        validate_srs "$srs" "$json" || return 1
+    done
+
+    combined="$UPDATE_WORK/combined.json"
+    canonical="$UPDATE_WORK/combined.canonical.json"
+    roundtrip="$UPDATE_WORK/roundtrip.json"
+    roundtrip_canonical="$UPDATE_WORK/roundtrip.canonical.json"
+    candidate_srs="$UPDATE_WORK/lkg.srs"
+    candidate_subnets="$UPDATE_WORK/lkg-subnets.lst"
+
+    if ! run_nice jq -s '
+        {
+          version: ([.[].version] | max),
+          rules: [.[].rules[]]
+        }
+    ' "$UPDATE_WORK"/json/*.json > "$combined"; then
+        err "cannot combine Community rule-sets"
+        return 1
+    fi
+
+    run_nice jq -S . "$combined" > "$canonical" || return 1
+
+    if ! run_nice sing-box rule-set compile --output "$candidate_srs" "$combined" >/dev/null 2>&1; then
+        err "cannot compile combined LKG SRS"
+        return 1
+    fi
+
+    if ! run_nice sing-box rule-set decompile --output "$roundtrip" "$candidate_srs" >/dev/null 2>&1; then
+        err "cannot decompile compiled LKG SRS"
+        return 1
+    fi
+
+    run_nice jq -S . "$roundtrip" > "$roundtrip_canonical" || return 1
+
+    if ! cmp -s "$canonical" "$roundtrip_canonical"; then
+        err "LKG SRS round-trip verification failed"
+        return 1
+    fi
+
+    if ! run_nice jq -r '
+        .rules[]?
+        | select(((keys_unsorted - ["domain_suffix","ip_cidr"]) | length) == 0)
+        | .ip_cidr[]?
+    ' "$combined" | sort -u > "$candidate_subnets"; then
+        err "cannot derive subnet LKG"
+        return 1
+    fi
+
+    count="$(wc -l < "$candidate_subnets" | tr -d ' ')"
+    special_count="$(run_nice jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"]) | length) > 0)] | length' "$combined")"
+    skipped_cidrs="$(run_nice jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"]) | length) > 0) | .ip_cidr[]?] | length' "$combined")"
+
+    log "candidate LKG passed compile/decompile round-trip; unconditional CIDRs: $count"
+    if [ "${special_count:-0}" -gt 0 ]; then
+        warn "skipped ${skipped_cidrs:-0} CIDRs from $special_count conditional rule(s)"
+    fi
+
+    return 0
+}
+
+build_expected_rulesets_json() {
+    local output lists
+    output="$1"
+    lists="$(community_lists)"
+
+    [ -n "$lists" ] || return 1
+
+    printf '%s\n' $lists | run_nice jq -R -s --arg base "$RELEASE_BASE" '
+      split("\n")
+      | map(select(length > 0))
+      | map({
+          type: "remote",
+          tag: ("main-" + . + "-community-ruleset"),
+          format: "binary",
+          url: ($base + "/" + . + ".srs"),
+          update_interval: "1s",
+          download_detour: "dead"
+        })
+    ' > "$output"
+}
+
+validate_cache_candidate() {
+    local candidate test_cache sets_json config log_file pid i
+
+    candidate="$1"
+    test_cache="$UPDATE_WORK/cache-test.db"
+    sets_json="$UPDATE_WORK/cache-test-rulesets.json"
+    config="$UPDATE_WORK/cache-test.json"
+    log_file="$UPDATE_WORK/cache-test.log"
+
+    cp "$candidate" "$test_cache" || return 1
+    build_expected_rulesets_json "$sets_json" || {
+        err "cannot build expected remote rule-set list"
+        return 1
+    }
+
+    if ! run_nice jq -n \
+        --slurpfile sets "$sets_json" \
+        --arg cache "$test_cache" '
+          ($sets[0]) as $rule_sets
+          | {
+              log: {
+                level: "info",
+                timestamp: true
+              },
+              outbounds: [
+                {
+                  type: "socks",
+                  tag: "dead",
+                  server: "127.0.0.1",
+                  server_port: 9,
+                  version: "5"
+                },
+                {
+                  type: "direct",
+                  tag: "direct"
+                }
+              ],
+              route: {
+                rules: [
+                  {
+                    action: "route",
+                    rule_set: ($rule_sets | map(.tag)),
+                    outbound: "direct"
+                  }
+                ],
+                rule_set: $rule_sets,
+                final: "direct"
+              },
+              experimental: {
+                cache_file: {
+                  enabled: true,
+                  path: $cache,
+                  store_fakeip: false
+                }
+              }
+            }
+        ' > "$config"; then
+        err "cannot build offline cache validation config"
+        return 1
+    fi
+
+    if ! run_nice sing-box -c "$config" check >/dev/null 2>&1; then
+        err "offline cache validation config is invalid"
+        return 1
+    fi
+
+    : > "$log_file"
+    run_nice sing-box run -c "$config" > "$log_file" 2>&1 &
+    pid=$!
+    i=0
+
+    while [ "$i" -lt "$CACHE_TEST_TIMEOUT" ]; do
+        if grep -q 'sing-box started' "$log_file" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            wait "$pid" 2>/dev/null
+            log "candidate cache passed offline cold-start validation"
+            return 0
+        fi
+
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null
+            err "candidate cache failed offline cold-start validation"
+            tail -n 12 "$log_file" 2>/dev/null | while IFS= read -r line; do
+                warn "cache-test: $line"
+            done
+            return 1
+        fi
+
+        sleep 1
+        i=$((i + 1))
+    done
+
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    err "candidate cache validation timed out after ${CACHE_TEST_TIMEOUT}s"
+    tail -n 12 "$log_file" 2>/dev/null | while IFS= read -r line; do
+        warn "cache-test: $line"
+    done
+    return 1
+}
+
+build_cache_candidate() {
+    local candidate
+    candidate="$UPDATE_WORK/cache.db"
+
+    runtime_ready || {
+        err "Podkop/sing-box runtime is not ready or runtime cache is missing"
+        return 1
+    }
+
+    cp "$CACHE_RUNTIME" "$candidate" || {
+        err "cannot copy live sing-box cache"
+        return 1
+    }
+
+    [ -s "$candidate" ] || {
+        err "candidate cache is empty"
+        return 1
+    }
+
+    validate_cache_candidate "$candidate"
+}
+
+prepare_persistent_file() {
+    local source temp mode
+    source="$1"
+    temp="$2"
+    mode="$3"
+
+    cp "$source" "$temp" || return 1
+    chmod "$mode" "$temp" || return 1
+}
+
+persist_candidates() {
+    local tmp_srs tmp_subnets tmp_cache srs_changed subnets_changed cache_changed
+
+    ensure_state_dir || return 1
+
+    tmp_srs="$STATE_DIR/.lkg.srs.new.$$"
+    tmp_subnets="$STATE_DIR/.lkg-subnets.lst.new.$$"
+    tmp_cache="$STATE_DIR/.cache.db.new.$$"
+    srs_changed=1
+    subnets_changed=1
+    cache_changed=1
+
+    [ -f "$LKG_SRS" ] && cmp -s "$UPDATE_WORK/lkg.srs" "$LKG_SRS" && srs_changed=0
+    [ -f "$LKG_SUBNETS" ] && cmp -s "$UPDATE_WORK/lkg-subnets.lst" "$LKG_SUBNETS" && subnets_changed=0
+    [ -f "$CACHE_LKG" ] && cmp -s "$UPDATE_WORK/cache.db" "$CACHE_LKG" && cache_changed=0
+
+    rm -f "$tmp_srs" "$tmp_subnets" "$tmp_cache"
+
+    if [ "$srs_changed" -eq 1 ]; then
+        prepare_persistent_file "$UPDATE_WORK/lkg.srs" "$tmp_srs" 0644 || return 1
+    fi
+    if [ "$subnets_changed" -eq 1 ]; then
+        prepare_persistent_file "$UPDATE_WORK/lkg-subnets.lst" "$tmp_subnets" 0644 || return 1
+    fi
+    if [ "$cache_changed" -eq 1 ]; then
+        prepare_persistent_file "$UPDATE_WORK/cache.db" "$tmp_cache" 0600 || return 1
+    fi
+
+    sync
+
+    if [ "$srs_changed" -eq 1 ]; then
+        mv "$tmp_srs" "$LKG_SRS" || return 1
+    fi
+    if [ "$subnets_changed" -eq 1 ]; then
+        mv "$tmp_subnets" "$LKG_SUBNETS" || return 1
+    fi
+
+    # cache.db is the success marker: replace it last, or only touch it when
+    # byte-identical, so its mtime represents the last fully validated refresh.
+    if [ "$cache_changed" -eq 1 ]; then
+        mv "$tmp_cache" "$CACHE_LKG" || return 1
+    else
+        touch "$CACHE_LKG" || return 1
+    fi
+
+    chmod 0644 "$LKG_SRS" "$LKG_SUBNETS" 2>/dev/null
+    chmod 0600 "$CACHE_LKG" 2>/dev/null
+    sync
+
+    log "persistent LKG refresh completed successfully"
+    return 0
+}
+
+refresh_snapshot_inner() {
+    local persist
+    persist="$1"
+
+    build_ruleset_candidate || return 1
+    build_cache_candidate || return 1
+
+    if [ "$persist" = "1" ]; then
+        persist_candidates || {
+            err "validated candidates could not be committed"
+            return 1
+        }
+    else
+        log "refresh test passed; persistent LKG was not changed"
+    fi
+
+    return 0
+}
+
+refresh_snapshot() {
+    local persist rc
+    persist="$1"
+
+    check_requirements || return 1
+    acquire_update_lock || return 1
+
+    UPDATE_WORK="/tmp/podkop-guard-update.$$"
+    rm -rf "$UPDATE_WORK"
+    mkdir -p "$UPDATE_WORK" || {
+        release_update_lock
+        UPDATE_WORK=""
+        return 1
+    }
+
+    log "starting validated LKG refresh"
+    refresh_snapshot_inner "$persist"
+    rc=$?
+
+    if [ "$rc" -ne 0 ]; then
+        warn "refresh failed; existing persistent LKG remains in service"
+    fi
+
+    cleanup_update
+    return "$rc"
+}
+
 verify_lkg() {
-    need jq
-    need sing-box
+    local json
+
+    need jq || return 1
+    need sing-box || return 1
 
     [ -s "$LKG_SRS" ] || {
         err "LKG ruleset not found: $LKG_SRS"
         return 1
     }
 
-    local json
     json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX.json)" || return 1
 
-    if ! sing-box rule-set decompile -o "$json" "$LKG_SRS" >/dev/null 2>&1; then
+    if ! run_nice sing-box rule-set decompile --output "$json" "$LKG_SRS" >/dev/null 2>&1; then
         rm -f "$json"
         err "cannot decompile $LKG_SRS"
         return 1
@@ -62,90 +585,51 @@ verify_lkg() {
 }
 
 derive_subnets() {
-    need jq
-    need sing-box
-    need sort
-    ensure_state_dir
+    local json new count special_count skipped_cidrs rc
+
+    need jq || return 1
+    need sing-box || return 1
+    need sort || return 1
+    need cmp || return 1
+    ensure_state_dir || return 1
 
     [ -s "$LKG_SRS" ] || {
         err "LKG ruleset not found: $LKG_SRS"
         return 1
     }
 
-    local json new special_count skipped_cidrs count
     json="$(mktemp /tmp/podkop-guard-lkg.XXXXXX.json)" || return 1
     new="$STATE_DIR/.lkg-subnets.lst.new.$$"
+    rc=1
 
-    trap 'rm -f "$json" "$new"' EXIT INT TERM
-
-    if ! sing-box rule-set decompile -o "$json" "$LKG_SRS" >/dev/null 2>&1; then
-        err "cannot decompile $LKG_SRS"
-        return 1
-    fi
-
-    # A plain Podkop Local Subnet List cannot represent conditions such as
-    # network/port_range. Only unconditional ip_cidr rules are exported.
-    jq -r '
-      .rules[]?
-      | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) == 0)
-      | .ip_cidr[]?
-    ' "$json" | sort -u > "$new"
-
-    count="$(wc -l < "$new" | tr -d ' ')"
-    special_count="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)] | length' "$json")"
-    skipped_cidrs="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0) | .ip_cidr[]?] | length' "$json")"
-
-    if [ "$count" -eq 0 ]; then
-        err "derived subnet list is empty; refusing to replace current LKG"
-        return 1
-    fi
-
-    if [ -f "$LKG_SUBNETS" ] && cmp -s "$new" "$LKG_SUBNETS"; then
-        rm -f "$new"
-        log "subnet LKG unchanged ($count CIDRs)"
-    else
-        mv "$new" "$LKG_SUBNETS" || return 1
-        chmod 0644 "$LKG_SUBNETS"
-        log "updated $LKG_SUBNETS ($count CIDRs)"
-    fi
-
-    if [ "$special_count" -gt 0 ]; then
-        log "warning: skipped $skipped_cidrs CIDRs from $special_count conditional rule(s)"
-        jq -r '
+    if run_nice sing-box rule-set decompile --output "$json" "$LKG_SRS" >/dev/null 2>&1 &&
+       run_nice jq -r '
           .rules[]?
-          | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)
-          | "  special keys: " + ((keys_unsorted - ["domain_suffix","ip_cidr"])|join(",")) + "; cidrs=" + ((.ip_cidr // [])|length|tostring)
-        ' "$json"
-    fi
+          | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) == 0)
+          | .ip_cidr[]?
+       ' "$json" | sort -u > "$new"; then
 
-    rm -f "$json"
-    trap - EXIT INT TERM
-}
+        count="$(wc -l < "$new" | tr -d ' ')"
+        special_count="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)] | length' "$json")"
+        skipped_cidrs="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0) | .ip_cidr[]?] | length' "$json")"
 
-cache_save() {
-    ensure_state_dir
+        if [ -f "$LKG_SUBNETS" ] && cmp -s "$new" "$LKG_SUBNETS"; then
+            log "subnet LKG unchanged ($count CIDRs)"
+        else
+            mv "$new" "$LKG_SUBNETS" && chmod 0644 "$LKG_SUBNETS" &&
+                log "updated $LKG_SUBNETS ($count CIDRs)"
+        fi
 
-    [ -s "$CACHE_RUNTIME" ] || {
-        err "runtime cache not found: $CACHE_RUNTIME"
-        return 1
-    }
-
-    local new
-    new="$STATE_DIR/.cache.db.new.$$"
-    trap 'rm -f "$new"' EXIT INT TERM
-
-    cp "$CACHE_RUNTIME" "$new" || return 1
-
-    if [ -f "$CACHE_LKG" ] && cmp -s "$new" "$CACHE_LKG"; then
-        rm -f "$new"
-        log "cache snapshot unchanged"
+        if [ "${special_count:-0}" -gt 0 ]; then
+            warn "skipped ${skipped_cidrs:-0} CIDRs from $special_count conditional rule(s)"
+        fi
+        rc=0
     else
-        mv "$new" "$CACHE_LKG" || return 1
-        chmod 0600 "$CACHE_LKG"
-        log "saved cache snapshot to $CACHE_LKG"
+        err "cannot derive subnet LKG"
     fi
 
-    trap - EXIT INT TERM
+    rm -f "$json" "$new"
+    return "$rc"
 }
 
 cache_restore() {
@@ -165,12 +649,97 @@ cache_restore() {
     log "restored cache snapshot to $CACHE_RUNTIME"
 }
 
+boot_restore() {
+    local path
+    path="$(configured_cache_path)"
+
+    if [ "$path" != "$EXPECTED_CACHE_PATH" ]; then
+        warn "boot restore skipped: Podkop cache_path is $path, expected $EXPECTED_CACHE_PATH"
+        return 0
+    fi
+
+    if [ ! -s "$CACHE_LKG" ]; then
+        warn "boot restore skipped: persistent cache snapshot is missing"
+        return 0
+    fi
+
+    if pidof sing-box >/dev/null 2>&1; then
+        log "boot restore skipped: sing-box is already running"
+        return 0
+    fi
+
+    mkdir -p /tmp/sing-box || {
+        err "boot restore failed: cannot create /tmp/sing-box"
+        return 1
+    }
+
+    cp "$CACHE_LKG" "$CACHE_RUNTIME" || {
+        err "boot restore failed: cannot copy persistent cache"
+        return 1
+    }
+    chmod 0600 "$CACHE_RUNTIME"
+    log "restored persistent sing-box cache snapshot before Podkop startup"
+    return 0
+}
+
+wait_seconds() {
+    local remaining chunk
+    remaining="$1"
+
+    while [ "$remaining" -gt 0 ] && [ "$STOP_REQUESTED" -eq 0 ]; do
+        chunk=60
+        [ "$remaining" -lt 60 ] && chunk="$remaining"
+        sleep "$chunk"
+        remaining=$((remaining - chunk))
+    done
+}
+
+daemon_loop() {
+    local age rc
+
+    SYSLOG_MODE=1
+    PODKOP_GUARD_SYSLOG=1
+    export PODKOP_GUARD_SYSLOG
+
+    check_requirements || return 1
+
+    trap 'STOP_REQUESTED=1' TERM INT
+    log "daemon started; startup grace ${STARTUP_GRACE}s, check interval ${CHECK_INTERVAL}s, refresh interval ${REFRESH_INTERVAL}s"
+
+    wait_seconds "$STARTUP_GRACE"
+
+    while [ "$STOP_REQUESTED" -eq 0 ]; do
+        if refresh_due; then
+            if runtime_ready; then
+                age="$(lkg_age 2>/dev/null)"
+                log "LKG refresh is due (age ${age:-unknown}s)"
+                refresh_snapshot 1
+                rc=$?
+                if [ "$rc" -ne 0 ]; then
+                    warn "validated refresh attempt failed; will retry after ${CHECK_INTERVAL}s"
+                fi
+            else
+                warn "LKG refresh is due, but Podkop/sing-box runtime is not ready; will retry after ${CHECK_INTERVAL}s"
+            fi
+        fi
+
+        wait_seconds "$CHECK_INTERVAL"
+    done
+
+    cleanup_update
+    log "daemon stopped"
+    return 0
+}
+
 status() {
+    local age due path lists
+
     printf 'podkop-guard %s\n' "$VERSION"
     printf 'state_dir=%s\n' "$STATE_DIR"
-    printf 'podkop_cache_path=%s\n' "$(uci -q get podkop.settings.cache_path 2>/dev/null || echo unknown)"
-    printf 'local_subnet_lists:\n'
-    uci -q show podkop.main.local_subnet_lists 2>/dev/null || printf '  (none)\n'
+    path="$(configured_cache_path)"
+    printf 'podkop_cache_path=%s\n' "$path"
+    lists="$(community_lists)"
+    printf 'community_lists=%s\n' "${lists:-none}"
 
     if [ -s "$LKG_SRS" ]; then
         printf 'lkg_srs=%s bytes\n' "$(wc -c < "$LKG_SRS" | tr -d ' ')"
@@ -178,7 +747,7 @@ status() {
         printf 'lkg_srs=missing\n'
     fi
 
-    if [ -s "$LKG_SUBNETS" ]; then
+    if [ -f "$LKG_SUBNETS" ]; then
         printf 'lkg_subnets=%s entries\n' "$(wc -l < "$LKG_SUBNETS" | tr -d ' ')"
     else
         printf 'lkg_subnets=missing\n'
@@ -186,9 +755,24 @@ status() {
 
     if [ -s "$CACHE_LKG" ]; then
         printf 'cache_snapshot=%s bytes\n' "$(wc -c < "$CACHE_LKG" | tr -d ' ')"
+        age="$(lkg_age 2>/dev/null)"
+        printf 'lkg_age_seconds=%s\n' "${age:-unknown}"
+        if refresh_due; then due=yes; else due=no; fi
+        printf 'refresh_due=%s\n' "$due"
     else
         printf 'cache_snapshot=missing\n'
+        printf 'refresh_due=yes\n'
     fi
+
+    if runtime_ready; then
+        printf 'podkop_runtime=ready\n'
+    else
+        printf 'podkop_runtime=not_ready\n'
+    fi
+
+    printf 'startup_grace=%s\n' "$STARTUP_GRACE"
+    printf 'check_interval=%s\n' "$CHECK_INTERVAL"
+    printf 'refresh_interval=%s\n' "$REFRESH_INTERVAL"
 }
 
 usage() {
@@ -196,15 +780,19 @@ usage() {
 Usage: podkop-guard <command>
 
 Commands:
-  status          Show current guard state
+  status          Show current guard/LKG state
   verify-lkg      Inspect the persistent LKG SRS
-  derive-subnets  Build a plain Local Subnet List from unconditional LKG CIDRs
-  cache-save      Save the current sing-box cache to persistent storage
-  cache-restore   Restore saved cache only while sing-box is stopped
+  derive-subnets  Rebuild Local Subnet LKG from persistent lkg.srs
+  refresh-test    Build and fully validate new candidates without saving them
+  refresh         Build, validate and atomically commit a new persistent LKG
+  cache-restore   Manually restore cache while sing-box is stopped
+  boot-restore    Safe boot-time cache restore (skips when not applicable)
+  daemon          Run the periodic validated refresh worker
   version         Print version
 
-This version intentionally does not modify Podkop UCI configuration and does
-not reload/restart Podkop. Configuration changes remain explicit user actions.
+The periodic worker checks once per hour and refreshes no more than once per
+24 hours after a successful snapshot. Failed refreshes never replace the
+current persistent LKG and are retried on the next hourly check.
 EOF
 }
 
@@ -212,9 +800,12 @@ case "${1:-}" in
     status) status ;;
     verify-lkg) verify_lkg ;;
     derive-subnets) derive_subnets ;;
-    cache-save) cache_save ;;
+    refresh-test) refresh_snapshot 0 ;;
+    refresh) refresh_snapshot 1 ;;
     cache-restore) cache_restore ;;
+    boot-restore) boot_restore ;;
+    daemon) daemon_loop ;;
     version|--version|-V) echo "$VERSION" ;;
-    help|--help|-h|"") usage ;;
+    help|--help|-h|'') usage ;;
     *) err "unknown command: $1"; usage >&2; exit 2 ;;
 esac
