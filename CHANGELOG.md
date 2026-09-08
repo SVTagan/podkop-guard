@@ -13,6 +13,12 @@
 - Первый persistent `refresh` на втором роутере также завершился с кодом `0`; созданы `lkg.srs` 19157 байт, `lkg-subnets.lst` на 1160 записей и `cache.db` 131072 байт.
 - `lkg-subnets.lst` подключён как `podkop.main.local_subnet_lists`; после штатного reload Podkop основной sing-box поднялся, `podkop_runtime=ready`, а Telegram-подсети присутствовали в `PodkopTable/podkop_subnets`.
 - Отличие 1160 CIDR от прежних 1161 связано с текущим содержимым upstream Community Lists и само по себе не является ошибкой guard.
+- После обновления worker до v0.2.3 повторный `refresh-test` завершился с кодом `0`; после завершения остался только штатный sing-box Podkop, процессы `cache-test.json` отсутствовали, `/tmp/podkop-guard-update.*` был полностью очищен. Исправление orphan-process bug подтверждено на реальном OpenWrt.
+- В ходе post-fix `refresh-test` отдельно подтверждён VPN download fallback: прямое скачивание `cloudflare.srs` завершилось неудачей, после чего файл успешно скачался через `awg0`, а весь validation pipeline завершился успешно.
+- Persistent `refresh` уже под v0.2.3 также завершился с кодом `0` без утечки тестовых sing-box; `status` показал `podkop_runtime=ready`, `refresh_due=no`, а `verify-lkg` завершился с кодом `0` и показал `version=3`, `rules=16`, `domains=1562`, `cidrs=1168`, `special_rules=2`.
+- Сервис v0.2.3 включён штатно через procd; подтверждены `S98podkop-guard`, `S99podkop` и `S99podkop-vpn-failover`, один daemon `podkop-guard` и один основной sing-box.
+- Выполнены два последовательных реальных reboot. В обоих boot log зафиксирован фактический порядок: `podkop-guard` сначала восстановил persistent sing-box cache, затем запустил daemon, после чего Podkop начал стартовать.
+- После обоих reboot `podkop_runtime=ready`, Local Subnet LKG присутствовал в nftables, Telegram CIDR были в `PodkopTable/podkop_subnets`, orphan test processes отсутствовали; обычные сайты, Telegram, YouTube и Gemini работали с клиентских устройств.
 
 ## 0.2.2 — 2026-08-27
 
