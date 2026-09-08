@@ -12,9 +12,9 @@
 
 ## Статус
 
-Текущая версия: **0.2.2**.
+Текущая версия: **0.2.3**.
 
-Полный pipeline проверен на реальном **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22**:
+Полный cold-start/reboot pipeline первоначально проверен на реальном **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22**:
 
 - `refresh-test` успешно обработал все 14 используемых Community Lists;
 - compile/decompile round-trip объединённого LKG прошёл без расхождений;
@@ -23,9 +23,18 @@
 - `refresh-test` занял около 15 секунд и не изменил SHA-256 persistent LKG-файлов;
 - выполнен настоящий reboot OpenWrt: `podkop-guard` на `START=98` восстановил cache до запуска Podkop на `START=99`;
 - после reboot sing-box runtime поднялся, LKG-подсети загрузились в nftables, проверенные сервисы продолжили работать;
-- `status`, `verify-lkg` и `refresh-test` проверены через LuCI `Custom Commands`; в v0.2.2 исправлена совместимость `verify-lkg`/`derive-subnets` с BusyBox `mktemp`.
+- `status`, `verify-lkg` и `refresh-test` проверены через LuCI `Custom Commands`.
 
-Это подтверждение конкретной протестированной конфигурации, а не гарантия совместимости со всеми версиями OpenWrt, Podkop и sing-box.
+Дополнительная совместимость проверена на втором **Cudy TR3000 v1 / OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1**:
+
+- preflight подтвердил `Podkop START=99`, VPN-секцию `podkop.main.connection_type='vpn'`, интерфейс `awg0` и тот же набор из 14 Community Lists;
+- installer v0.2.2 успешно установился с автоматическим созданием 4 LuCI Custom Commands;
+- `refresh-test` завершился с кодом `0` примерно за 16 секунд; получено 1160 безусловных CIDR, 8 conditional CIDR из 2 правил пропущены;
+- persistent `refresh` завершился с кодом `0`; созданы `lkg.srs` 19157 байт, `lkg-subnets.lst` на 1160 записей и `cache.db` 131072 байт;
+- после подключения `lkg-subnets.lst` и штатного reload Podkop `podkop_runtime=ready`, а Telegram-подсети присутствуют в `PodkopTable/podkop_subnets`;
+- в ходе этого теста найден баг v0.2.2: offline validator мог оставлять orphan-процесс тестового sing-box из-за запуска через background shell-функцию `run_nice`; v0.2.3 запускает validator напрямую через `nice`, чтобы `$!` соответствовал завершаемому процессу.
+
+Это подтверждение конкретных протестированных конфигураций, а не гарантия совместимости со всеми версиями OpenWrt, Podkop и sing-box.
 
 ## Что делает
 
@@ -45,7 +54,7 @@
 /etc/podkop-guard/cache.db
 ```
 
-Init-сервис запускается с `START=98`, то есть непосредственно перед Podkop 0.7.21 (`START=99`), и восстанавливает cache в `/tmp` до запуска Podkop.
+Init-сервис запускается с `START=98`, то есть непосредственно перед Podkop (`START=99` на проверенных версиях 0.7.21 и 0.7.22), и восстанавливает cache в `/tmp` до запуска Podkop.
 
 Если sing-box уже работает, boot-restore ничего не перезаписывает.
 
@@ -118,10 +127,8 @@ offline cold-start test с намеренно мёртвым download path
 
 Проверено на:
 
-- Cudy TR3000 v1;
-- OpenWrt 24.10.5;
-- Podkop 0.7.21;
-- sing-box 1.12.22.
+- Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22;
+- Cudy TR3000 v1 / OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1.
 
 Обязательные компоненты:
 
@@ -271,7 +278,7 @@ Podkop продолжает полностью владеть обычной м�
 
 VPN fallback для скачивания применяется только когда секция `main` определяется как VPN и задан `podkop.main.interface`.
 
-Порядок `START=98 → Podkop START=99` проверен для Podkop 0.7.21. После крупных обновлений Podkop порядок init-сервисов следует проверить заново.
+Порядок `START=98 → Podkop START=99` проверен для Podkop 0.7.21 и 0.7.22. После крупных обновлений Podkop порядок init-сервисов следует проверить заново.
 
 Проект не пытается гарантировать работу при повреждённом persistent LKG или при несовместимых изменениях формата cache/rule-set в будущих версиях sing-box.
 
