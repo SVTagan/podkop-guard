@@ -3,7 +3,9 @@
 set -u
 
 TAG="podkop-guard"
-BASE_URL="${PODKOP_GUARD_BASE_URL:-https://raw.githubusercontent.com/SVTagan/podkop-guard/main}"
+VERSION="0.2.4"
+DEFAULT_REF="v${VERSION}"
+BASE_URL="${PODKOP_GUARD_BASE_URL:-https://raw.githubusercontent.com/SVTagan/podkop-guard/${DEFAULT_REF}}"
 WORKER_DST="/usr/bin/podkop-guard"
 INIT_DST="/etc/init.d/podkop-guard"
 STATE_DIR="/etc/podkop-guard"
@@ -95,7 +97,7 @@ elif [ "$luci_present" -eq 1 ]; then
     fi
 fi
 
-for cmd in logger nice sort cmp date mktemp grep tail touch sync; do
+for cmd in logger nice sort cmp date mktemp grep tail touch sync sed head; do
     command -v "$cmd" >/dev/null 2>&1 || fail "$cmd is required."
 done
 
@@ -114,10 +116,10 @@ TMP_WORKER="/tmp/${TAG}.worker.$$"
 TMP_INIT="/tmp/${TAG}.init.$$"
 trap 'rm -f "$TMP_WORKER" "$TMP_INIT"' EXIT INT TERM
 
-info "Downloading podkop-guard worker..."
+info "Downloading podkop-guard ${VERSION} worker..."
 fetch "${BASE_URL}/podkop-guard" "$TMP_WORKER" || fail "Failed to download worker from ${BASE_URL}."
 
-info "Downloading procd init script..."
+info "Downloading podkop-guard ${VERSION} procd init script..."
 fetch "${BASE_URL}/podkop-guard.init" "$TMP_INIT" || fail "Failed to download init script from ${BASE_URL}."
 
 [ -s "$TMP_WORKER" ] || fail "Downloaded worker is empty."
@@ -127,6 +129,11 @@ fetch "${BASE_URL}/podkop-guard.init" "$TMP_INIT" || fail "Failed to download in
 /bin/sh -n "$TMP_INIT" || fail "Downloaded init script failed shell syntax validation."
 grep -q '^# podkop-guard - persistent Last Known Good protection' "$TMP_WORKER" || \
     fail "Downloaded worker does not look like podkop-guard."
+
+worker_version="$(sed -n 's/^VERSION="\([^"]*\)".*/\1/p' "$TMP_WORKER" | head -n 1)"
+[ -n "$worker_version" ] || fail "Cannot determine version of downloaded worker."
+[ "$worker_version" = "$VERSION" ] || \
+    fail "Downloaded worker version ${worker_version} does not match installer version ${VERSION}."
 
 existing_install=0
 was_running=0
@@ -230,7 +237,7 @@ fi
 rm -f "$TMP_WORKER" "$TMP_INIT"
 trap - EXIT INT TERM
 
-info "Installed ${TAG}."
+info "Installed ${TAG} ${VERSION}."
 printf '\n'
 "$WORKER_DST" status || true
 printf '\n'
