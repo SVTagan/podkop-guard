@@ -1,5 +1,19 @@
 # История изменений
 
+## 0.2.3 — 2026-09-08
+
+Исправление утечки тестовых процессов sing-box, обнаруженной при дополнительной проверке на втором Cudy TR3000.
+
+- При offline cache validation тестовый sing-box больше не запускается через background shell-функцию `run_nice`: используется прямой `nice -n "$NICE_LEVEL" sing-box ... &`, чтобы `$!` соответствовал процессу, который затем завершается через `kill`/`wait`.
+- В v0.2.2 на реальном роутере было воспроизводимо подтверждено, что после успешных `refresh-test` и `refresh` могли оставаться orphan-процессы вида `sing-box run -c /tmp/podkop-guard-update.*/cache-test.json`; временные каталоги уже удалялись, а тестовые sing-box продолжали работать.
+- Два таких orphan-процесса были подтверждены через `/proc/<pid>/cmdline` и штатно завершены `SIGTERM`; основной sing-box Podkop при этом продолжил работать.
+- Дополнительный preflight и pipeline выполнены на втором **Cudy TR3000 v1 / OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1**.
+- На этой конфигурации подтверждены `Podkop START=99`, VPN-секция `podkop.main.connection_type='vpn'`, интерфейс `awg0`, автоматическая LuCI-интеграция и чтение всех 14 Community Lists.
+- `refresh-test` завершился с кодом `0` примерно за 16 секунд: все 14 SRS скачаны напрямую, compile/decompile round-trip пройден, получено 1160 безусловных CIDR, 8 conditional CIDR из 2 правил корректно пропущены, offline cold-start cache validation пройдена.
+- Первый persistent `refresh` на втором роутере также завершился с кодом `0`; созданы `lkg.srs` 19157 байт, `lkg-subnets.lst` на 1160 записей и `cache.db` 131072 байт.
+- `lkg-subnets.lst` подключён как `podkop.main.local_subnet_lists`; после штатного reload Podkop основной sing-box поднялся, `podkop_runtime=ready`, а Telegram-подсети присутствовали в `PodkopTable/podkop_subnets`.
+- Отличие 1160 CIDR от прежних 1161 связано с текущим содержимым upstream Community Lists и само по себе не является ошибкой guard.
+
 ## 0.2.2 — 2026-08-27
 
 Исправления совместимости CLI-команд с BusyBox и завершение LuCI-интеграции.
