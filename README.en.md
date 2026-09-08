@@ -2,45 +2,33 @@
 
 [Русский](README.md)
 
-A small OpenWrt helper that keeps a validated **Last Known Good (LKG)** snapshot for [Podkop](https://github.com/itdoginfo/podkop) Community Lists and helps recover from cold starts when GitHub/`raw.githubusercontent.com` is unavailable.
+A small OpenWrt helper that keeps a validated **Last Known Good (LKG)** snapshot for [Podkop](https://github.com/itdoginfo/podkop) Community Lists and helps survive a bad cold start when GitHub/`raw.githubusercontent.com` is unavailable.
 
-The project was created after a real failure where Podkop could not download part of its lists, required IP subnets were missing from `PodkopTable/podkop_subnets`, and a reboot removed sing-box remote rule-set cache from `/tmp`.
+The project originated from a real failure: Podkop could not download part of its lists, required IP subnets were missing from `PodkopTable/podkop_subnets`, and after `/tmp` was lost sing-box could be left without its remote rule-set cache. Some domain-routed services still worked while applications connecting directly to IP addresses failed.
 
-`podkop-guard` does not replace or patch Podkop. It keeps a separately validated safety snapshot and only replaces that snapshot after all checks succeed.
+`podkop-guard` does not replace or patch Podkop. It keeps a separately validated safety snapshot and only updates it after the full validation pipeline succeeds.
 
-This is an independent project and is not affiliated with the Podkop developers.
+This is an independent project and is not part of or affiliated with Podkop.
 
 ## Status
 
-Current version: **0.2.3**.
+Current version: **0.2.4**.
 
-The full cold-start/reboot pipeline was initially validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22** system:
+Validated real-world configurations:
 
-- `refresh-test` successfully processed all 14 Community Lists used on the test router;
-- the combined LKG passed compile/decompile round-trip validation without differences;
-- the Local Subnet LKG contained 1161 unconditional CIDRs, while 8 conditional CIDRs were intentionally skipped;
-- the offline cold-start cache test passed with an intentionally unavailable download path;
-- the full `refresh-test` took about 15 seconds and did not change the SHA-256 of any persistent LKG file;
-- a real OpenWrt reboot was performed: `podkop-guard` at `START=98` restored the cache before Podkop started at `START=99`;
-- after reboot, sing-box runtime came up, LKG subnets were loaded into nftables, and the tested routed services remained functional;
-- `status`, `verify-lkg`, and `refresh-test` were exercised through LuCI Custom Commands.
+| Device | OpenWrt | Podkop | sing-box | Community Lists | Validated |
+| --- | --- | --- | --- | ---: | --- |
+| Cudy TR3000 v1 | 24.10.5 | 0.7.21 | 1.12.22 | 14 | full `refresh-test`/`refresh`, Local Subnet LKG, offline cache validation, LuCI, reboot/cold start |
+| Cudy TR3000 v1 | 24.10.4 | 0.7.22-r1 | 1.12.22-r1 | 14 | full pipeline, VPN download fallback, orphan-validator fix, two reboots |
+| Xiaomi Redmi Router AX6000 (stock layout) | 24.10.5 | 0.7.21-r1 | 1.12.22-r1 | 21 | full pipeline, cache restore, Local Subnet LKG, reboot and controlled WAN bounce |
 
-Additional compatibility testing was performed on a second **Cudy TR3000 v1 / OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1** system:
-
-- preflight confirmed `Podkop START=99`, VPN mode via `podkop.main.connection_type='vpn'`, interface `awg0`, and the same set of 14 Community Lists;
-- the v0.2.2 installer completed successfully and created the 4 LuCI Custom Commands automatically;
-- `refresh-test` completed with exit code `0` in about 16 seconds; 1160 unconditional CIDRs were derived and 8 conditional CIDRs from 2 rules were skipped;
-- persistent `refresh` completed with exit code `0`, producing a 19157-byte `lkg.srs`, a 1160-entry `lkg-subnets.lst`, and a 131072-byte `cache.db`;
-- after adding `lkg-subnets.lst` and reloading Podkop, `podkop_runtime=ready` and Telegram subnets were present in `PodkopTable/podkop_subnets`;
-- this second-router test exposed a v0.2.2 bug: the offline validator could leave an orphan test sing-box process because it was started through the background shell function `run_nice`; v0.2.3 launches the validator directly through `nice` so `$!` refers to the process that is later terminated.
-
-These results validate the specific tested configurations; they are not a guarantee of compatibility with every OpenWrt, Podkop, or sing-box version.
+These results validate the listed configurations, not every OpenWrt, Podkop, or sing-box version. Upstream Community Lists change over time, so CIDR counts, SRS contents, and file sizes are not constants.
 
 ## What it does
 
-There are two independent protections.
+The project has two independent functions.
 
-### Boot recovery
+### 1. Recovery after reboot/power loss
 
 Podkop/sing-box normally uses:
 
@@ -48,24 +36,26 @@ Podkop/sing-box normally uses:
 /tmp/sing-box/cache.db
 ```
 
-Since `/tmp` is volatile, `podkop-guard` keeps a validated copy at:
+`/tmp` is volatile. `podkop-guard` keeps a validated copy on flash:
 
 ```text
 /etc/podkop-guard/cache.db
 ```
 
-Its OpenWrt init service runs at `START=98`, immediately before Podkop (`START=99` on the tested 0.7.21 and 0.7.22 versions), and restores the cache before Podkop starts. If sing-box is already running, the restore is skipped.
+Its init service runs at `START=98`, immediately before Podkop (`START=99` on the tested versions), and restores the cache into `/tmp` before Podkop starts.
 
-### Periodic validated refresh
+If sing-box is already running, boot restore does not overwrite the live cache.
 
-The same procd service runs a lightweight worker:
+### 2. Periodic validated LKG refresh
 
-- 300 second startup grace;
-- state check once per hour;
-- successful LKG refresh no more than once per 24 hours;
+After boot the same service starts a lightweight procd worker:
+
+- startup grace: 300 seconds;
+- state check: once per hour;
+- successful LKG refresh: no more than once per 24 hours;
 - failed refresh leaves the old LKG untouched and retries one hour later.
 
-Most of the time the worker is sleeping. Heavier `jq` and `sing-box` operations run with `nice -n 10`.
+Most of the time the worker sleeps. Heavier `jq`/`sing-box` work runs through `nice -n 10`.
 
 ## Persistent state
 
@@ -76,57 +66,52 @@ Most of the time the worker is sleeping. Heavier `jq` and `sing-box` operations 
 ```
 
 - `lkg.srs` — combined validated binary SRS built from current `podkop.main.community_lists`;
-- `lkg-subnets.lst` — Podkop Local Subnet List containing only unconditional `ip_cidr` rules;
+- `lkg-subnets.lst` — a normal Podkop Local Subnet List containing only unconditional `ip_cidr` values;
 - `cache.db` — validated sing-box remote rule-set cache for cold starts.
 
-The `cache.db` mtime is also the marker for the last fully successful refresh, so no separate timestamp file is required. The age is read with BusyBox `date -r FILE +%s`; a separate `stat`/coreutils package is not required.
+The `cache.db` mtime is also the marker of the last fully successful refresh. Snapshot age is read with BusyBox `date -r FILE +%s`; no separate timestamp file or `stat`/coreutils dependency is needed.
 
-## Refresh logic
+## Refresh pipeline
 
-For every current Community List, the worker downloads:
+For every current Community List, `podkop-guard` downloads:
 
 ```text
 https://github.com/itdoginfo/allow-domains/releases/latest/download/<list>.srs
 ```
 
-It first tries a normal `curl` with strict timeouts. If that fails and the main Podkop section is in VPN mode, it retries once through the current `podkop.main.interface` using `curl --interface`. For compatibility with Podkop UCI variants, both `podkop.main.connection_type` and `podkop.main.type` are understood.
+It first tries a normal `curl` with strict timeouts. If that fails and the main section is in VPN mode, it retries once through the current `podkop.main.interface` using `curl --interface`. Both `podkop.main.connection_type` and `podkop.main.type` are understood for UCI compatibility.
 
-The refresh aborts immediately if any required SRS cannot be downloaded. Partial snapshots are never accepted.
+If any required SRS cannot be downloaded, the refresh aborts immediately. Partial snapshots are never accepted.
 
-Before replacing persistent LKG data, all of the following must succeed:
+Before persistent LKG data is replaced, every stage below must succeed:
 
 ```text
-all current Community SRS downloaded
+ALL current Community SRS downloaded
         ↓
-each SRS decompiles with installed sing-box
+each SRS successfully decompiled by installed sing-box
         ↓
-all source rules combined
+all rules combined
         ↓
 compile → candidate lkg.srs → decompile
         ↓
-canonical source JSON matches byte-for-byte
+canonical JSON before/after matches byte-for-byte
         ↓
 candidate lkg-subnets.lst built
         ↓
 candidate cache.db copied from live sing-box
         ↓
-offline cold-start test with an intentionally dead download path
+offline cold-start test with intentionally dead download path
         ↓
 only then commit to flash
 ```
 
-The cache validation launches a separate test sing-box with all expected current Community rule-sets configured as remote while their download detour points to dead SOCKS `127.0.0.1:9`.
+The cache test starts a separate sing-box instance. All expected Community rule-sets are configured as remote while their download detour points to intentionally dead SOCKS `127.0.0.1:9`. Persistent LKG is only replaced after that validator starts successfully.
 
 ## Conditional CIDRs
 
-A plain Podkop Local Subnet List cannot represent conditions such as `network` or `port_range`. Therefore only `ip_cidr` values from unconditional rules are exported. Conditional CIDRs are skipped with a warning instead of being silently broadened.
+A plain Podkop Local Subnet List can only store IP/CIDR values and cannot preserve conditions such as `network` or `port_range`. `podkop-guard` therefore exports only `ip_cidr` values from unconditional rules. Conditional CIDRs are skipped with a warning instead of being silently broadened.
 
-## Requirements and dependencies
-
-Tested on:
-
-- Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22;
-- Cudy TR3000 v1 / OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1.
+## Requirements
 
 Required components:
 
@@ -134,40 +119,55 @@ Required components:
 - sing-box;
 - `curl`;
 - `jq`;
+- OpenWrt with `opkg`;
 - standard BusyBox tools: `nice`, `date` with `-r` support, `sort`, `cmp`, `logger`, `mktemp`, `grep`, `tail`, `touch`, `sync`.
 
-The installer targets OpenWrt systems using `opkg`. Missing `curl` or `jq` packages are installed automatically. A separate `stat` utility is not required.
+If `curl` or `jq` is missing, the installer attempts to install it automatically.
 
 ### LuCI
 
-LuCI integration is intentionally an **optional dependency** of the core guard:
+LuCI integration is optional:
 
-- when `luci-base` is present, the installer checks for `luci-app-commands` and attempts to install it through `opkg` when missing;
-- it then creates four named Custom Commands automatically;
-- if `luci-app-commands` is unavailable from the configured feeds or installation fails, the core `podkop-guard` installation continues with a warning;
-- on headless OpenWrt without LuCI, no LuCI packages are pulled in;
-- uninstall removes only the four `podkop-guard` UCI sections and deliberately keeps `luci-app-commands`, because other custom commands may depend on it.
-
-This keeps the recovery mechanism independent from the web UI.
+- when LuCI is already present, the installer checks `luci-app-commands` and attempts to install it if needed;
+- four named Custom Commands are then created;
+- failure to install `luci-app-commands` does not fail the core guard installation;
+- headless OpenWrt systems do not pull LuCI packages;
+- uninstall removes only the guard's UCI command sections and leaves `luci-app-commands` installed.
 
 ## Installation
 
+For a stable version, use the installer from the release tag. It installs worker/init files from the same tag, so the installation is reproducible and does not depend on future changes to `main`.
+
+With `curl`:
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SVTagan/podkop-guard/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/SVTagan/podkop-guard/v0.2.4/install.sh \
   -o /tmp/podkop-guard-install.sh && \
 sh /tmp/podkop-guard-install.sh
 ```
 
-On first installation the service intentionally remains **STOPPED + DISABLED**.
+Or with `uclient-fetch`:
 
-With Podkop and sing-box working normally, run:
+```sh
+uclient-fetch -q -O /tmp/podkop-guard-install.sh \
+  https://raw.githubusercontent.com/SVTagan/podkop-guard/v0.2.4/install.sh && \
+sh /tmp/podkop-guard-install.sh
+```
+
+On first installation the service deliberately remains **STOPPED + DISABLED**. Build and validate the initial LKG first.
+
+For deliberate testing of another branch or mirror, the source can be overridden with `PODKOP_GUARD_BASE_URL`; normal users do not need this.
+
+## First setup
+
+Make sure Podkop and sing-box currently work, then run:
 
 ```sh
 podkop-guard refresh-test
 podkop-guard refresh
 ```
 
-Then configure the generated Local Subnet List once:
+Add the generated file once to the `main` section as a normal Local Subnet List:
 
 ```sh
 if ! uci -q get podkop.main.local_subnet_lists 2>/dev/null \
@@ -185,11 +185,23 @@ Reload Podkop once:
 /etc/init.d/podkop reload
 ```
 
-After verifying routed services, enable the guard:
+Verify the services you care about, then enable/start the guard:
 
 ```sh
 /etc/init.d/podkop-guard enable
 /etc/init.d/podkop-guard start
+```
+
+## Upgrading podkop-guard
+
+Running a newer installer over an existing installation preserves persistent LKG and the current service state. If the guard was enabled/running, the installer restores that state after replacing worker/init.
+
+Useful post-upgrade checks:
+
+```sh
+podkop-guard version
+podkop-guard status
+podkop-guard verify-lkg
 ```
 
 ## CLI
@@ -209,7 +221,7 @@ podkop-guard version
 
 ## LuCI Custom Commands
 
-On a normal installation on a router with LuCI, the installer automatically creates:
+On a normal LuCI installation the installer creates:
 
 ```text
 Podkop Guard: Status       → /usr/bin/podkop-guard status
@@ -218,9 +230,34 @@ Podkop Guard: Refresh Test → /usr/bin/podkop-guard refresh-test
 Podkop Guard: Refresh LKG  → /usr/bin/podkop-guard refresh
 ```
 
-Stable named sections (`podkop_guard_*`) make the operation idempotent, so running the installer again updates the same entries instead of creating duplicates. `param=0` and `public=0` are enforced on every install: arbitrary extra arguments are disabled and unauthenticated execution is not allowed. A user-customized `description`, if already present, is preserved on upgrades.
+The sections use stable `podkop_guard_*` names, so reinstalling does not create duplicates. `param=0` and `public=0` are enforced, while an existing user-customized `description` is preserved.
 
-`Refresh Test` performs the full pipeline without writing persistent LKG state. `Refresh LKG` does update the persistent snapshot after successful validation.
+## Podkop cold-start diagnostics
+
+During v0.2.4 validation on Redmi AX6000 we observed a state that **did not indicate guard LKG/cache corruption**, but appeared after cold boot while Podkop's native WAN interface monitoring was enabled.
+
+Observed sequence:
+
+- `podkop.settings.enable_badwan_interface_monitoring='1'`;
+- `podkop.settings.badwan_reload_delay='2000'`;
+- after reboot Podkop and sing-box were running, Telegram CIDRs were present in `PodkopTable/podkop_subnets`, and persistent/runtime cache checks passed, but Telegram could still fail;
+- in one bad state sing-box logged Telegram connections through `direct-out`; during another reboot with a longer delay, early connections through the correct `main-out` returned `network is unreachable` while `awg0` was not ready yet;
+- `podkop-guard refresh-test`, executed while the bad state was present, successfully passed offline cold-start validation using the current runtime cache;
+- increasing `badwan_reload_delay` to `20000` produced a clean cold boot;
+- disabling `enable_badwan_interface_monitoring` also produced a clean cold boot;
+- on this specific configuration a controlled `ifdown wan; sleep 10; ifup wan` restored both `wan` and `awg0`, while Podkop kept working without a manual reload.
+
+This observation **does not prove a specific root cause inside Podkop**. It is consistent with the class of behavior described in open upstream issue [itdoginfo/podkop#360](https://github.com/itdoginfo/podkop/issues/360), which discusses a possible race between an unfinished `podkop start` and a `podkop reload` triggered by `WAN up`. We do not claim our case is definitively the same bug.
+
+If Podkop appears to be running after a cold start but only some routed services fail, useful checks are:
+
+```sh
+uci -q get podkop.settings.enable_badwan_interface_monitoring
+uci -q get podkop.settings.badwan_reload_delay
+logread | grep -Ei 'podkop|sing-box' | tail -n 100
+```
+
+A practical diagnostic step is to increase `badwan_reload_delay` first and retest. Disable WAN monitoring only if you understand its purpose and have separately verified that your own setup recovers correctly after WAN loss/return without that trigger.
 
 ## Logs
 
@@ -230,33 +267,43 @@ logread | grep podkop-guard
 
 No persistent log file is written to flash.
 
-## Intentionally out of scope
+## Runtime cost
 
-`podkop-guard` does not:
+In normal operation:
 
-- patch Podkop;
-- modify `community_lists`;
-- enable Podkop `download_lists_via_proxy`;
-- switch VPN interfaces;
-- reload/restart Podkop during refresh;
-- use cron;
-- implement NORMAL/FALLBACK modes;
-- keep the live sing-box cache on flash;
-- run a local HTTP server.
+- one sleeping `ash` process under procd;
+- one cheap LKG age check per hour;
+- roughly once per day, SRS downloads and several seconds of validation;
+- heavier work runs with reduced CPU priority (`nice -n 10`);
+- flash writes happen only after a fully successful refresh.
 
-Podkop remains responsible for normal routing and normal list updates.
+If GitHub is unavailable, the worker makes one direct request and at most one VPN retry for the first required file that fails, then sleeps for another hour.
+
+## What podkop-guard intentionally does NOT do
+
+- does not patch Podkop;
+- does not change `community_lists`;
+- does not enable Podkop `download_lists_via_proxy`;
+- does not switch VPN tunnels;
+- does not reload/restart Podkop during refresh;
+- does not use cron;
+- does not implement NORMAL/FALLBACK modes;
+- does not keep the live sing-box cache on flash;
+- does not run a local HTTP server.
+
+Podkop remains responsible for normal routing and its own standard list updates.
 
 ## Limitations
 
-The current implementation focuses on `podkop.main.community_lists`.
+The current implementation targets `podkop.main.community_lists`.
 
-If Community Lists are changed while the current LKG is less than 24 hours old, run `podkop-guard refresh` manually rather than waiting for the next scheduled refresh.
+If the Community List set changes while the current LKG is less than 24 hours old, run `podkop-guard refresh` manually instead of waiting for the next scheduled refresh.
 
-VPN download fallback is used only when the main Podkop section is detected as VPN mode and `podkop.main.interface` is set.
+VPN download fallback is only used when the `main` section is detected as VPN mode and `podkop.main.interface` is configured.
 
-The `START=98 → Podkop START=99` boot order was verified for Podkop 0.7.21 and 0.7.22. Re-check init order after major Podkop upgrades.
+The `START=98 → Podkop START=99` ordering was verified on the versions listed above. Check init ordering again after major Podkop upgrades.
 
-The project does not attempt to guarantee recovery from a corrupted persistent LKG or incompatible future changes to sing-box cache/rule-set formats.
+The project cannot guarantee recovery from a corrupted persistent LKG or future incompatible changes to sing-box cache/rule-set formats.
 
 ## Changelog
 
