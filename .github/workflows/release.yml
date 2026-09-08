@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag; must match podkop-guard version, for example v0.2.3'
+        description: 'Release tag; must match podkop-guard version, for example v0.2.4'
         required: true
-        default: 'v0.2.3'
+        default: 'v0.2.4'
         type: string
       prerelease:
         description: 'Mark this GitHub Release as a prerelease'
@@ -48,6 +48,17 @@ jobs:
             exit 1
           fi
 
+          installer_version="$(sed -n 's/^VERSION="\([^"]*\)".*/\1/p' install.sh | head -n 1)"
+          if [[ -z "${installer_version}" ]]; then
+            echo "Cannot determine VERSION from install.sh." >&2
+            exit 1
+          fi
+
+          if [[ "${installer_version}" != "${version}" ]]; then
+            echo "install.sh version ${installer_version} does not match podkop-guard version ${version}." >&2
+            exit 1
+          fi
+
           expected_tag="v${version}"
           if [[ "${RELEASE_TAG}" != "${expected_tag}" ]]; then
             echo "Release tag ${RELEASE_TAG} does not match podkop-guard version ${version}. Expected ${expected_tag}." >&2
@@ -80,6 +91,21 @@ jobs:
 
           grep -Fq "## ${VERSION} " CHANGELOG.md || {
             echo "CHANGELOG.md has no section for ${VERSION}." >&2
+            exit 1
+          }
+
+          grep -Fq 'DEFAULT_REF="v${VERSION}"' install.sh || {
+            echo "install.sh is not pinned to its own release tag." >&2
+            exit 1
+          }
+
+          grep -Fq "podkop-guard/v${VERSION}/install.sh" README.md || {
+            echo "README.md stable install command is not pinned to v${VERSION}." >&2
+            exit 1
+          }
+
+          grep -Fq "podkop-guard/v${VERSION}/install.sh" README.en.md || {
+            echo "README.en.md stable install command is not pinned to v${VERSION}." >&2
             exit 1
           }
 
@@ -117,10 +143,6 @@ jobs:
             echo
             echo "GitHub Release проекта podkop-guard — небольшого helper для повышения отказоустойчивости Podkop/OpenWrt с проверенным Last Known Good snapshot Community Lists и восстановлением sing-box cache перед запуском Podkop после reboot/power loss."
             echo
-            if [[ "${VERSION}" == "0.2.3" ]]; then
-              echo "Версия 0.2.3 включает исправление утечки тестового sing-box offline validator, найденной при дополнительной проверке на втором Cudy TR3000. Совместимость дополнительно проверяется на OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1 в дополнение к ранее проверенной OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22."
-              echo
-            fi
             echo "Проект предоставляется как есть; использование — на свой риск. Перед установкой рекомендуется прочитать README и иметь доступ к роутеру для восстановления конфигурации."
             echo
             echo "## Изменения"
@@ -132,7 +154,7 @@ jobs:
             echo "[README](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/README.md) · [English README](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/README.en.md) · [CHANGELOG](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/CHANGELOG.md)"
           } > release-notes.md
 
-      - name: Create permanent GitHub Release
+      - name: Create GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -143,7 +165,7 @@ jobs:
           set -euo pipefail
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "Release ${RELEASE_TAG} already exists. Versions are immutable; create a new version instead." >&2
+            echo "Release ${RELEASE_TAG} already exists. Bump the version and use a new tag instead." >&2
             exit 1
           fi
 
