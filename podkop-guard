@@ -3,7 +3,7 @@
 # podkop-guard - persistent Last Known Good protection for Podkop/OpenWrt
 # SPDX-License-Identifier: MIT
 
-VERSION="0.2.3"
+VERSION="0.2.4"
 
 STATE_DIR="${PODKOP_GUARD_DIR:-/etc/podkop-guard}"
 LKG_SRS="$STATE_DIR/lkg.srs"
