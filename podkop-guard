@@ -3,7 +3,7 @@
 # podkop-guard - persistent Last Known Good protection for Podkop/OpenWrt
 # SPDX-License-Identifier: MIT
 
-VERSION="0.2.2"
+VERSION="0.2.3"
 
 STATE_DIR="${PODKOP_GUARD_DIR:-/etc/podkop-guard}"
 LKG_SRS="$STATE_DIR/lkg.srs"
@@ -392,7 +392,7 @@ validate_cache_candidate() {
     fi
 
     : > "$log_file"
-    run_nice sing-box run -c "$config" > "$log_file" 2>&1 &
+    nice -n "$NICE_LEVEL" sing-box run -c "$config" > "$log_file" 2>&1 &
     pid=$!
     i=0
 
