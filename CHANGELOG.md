@@ -1,5 +1,25 @@
 # История изменений
 
+## 0.2.4 — 2026-09-08
+
+Release hardening перед первым stable-релизом и дополнительная проверка на третьем реальном роутере. Основной LKG/refresh pipeline не менялся.
+
+- Версия дополнительно проверена на **Xiaomi Redmi Router AX6000 (stock layout) / OpenWrt 24.10.5 / Podkop 0.7.21-r1 / sing-box 1.12.22-r1**.
+- На Redmi использовался расширенный набор из 21 `podkop.main.community_lists`; `refresh-test` успешно скачал и проверил все 21 SRS, прошёл compile/decompile round-trip и offline cold-start cache validation.
+- На этой конфигурации получено 1160 безусловных CIDR; 8 CIDR из 2 conditional rules корректно пропущены. Persistent `refresh` создал `lkg.srs` 19758 байт, `lkg-subnets.lst` на 1160 записей и `cache.db` 131072 байт.
+- `verify-lkg` на Redmi показал `version=3`, `rules=23`, `domains=1507`, `cidrs=1168`, `special_rules=2`.
+- Исправление v0.2.3 для offline validator повторно подтверждено: после `refresh-test`/`refresh` остался только основной sing-box, orphan test processes и `/tmp/podkop-guard-update.*` отсутствовали.
+- Отдельно проверен ручной `boot-restore`: после остановки Podkop и удаления `/tmp/sing-box/cache.db` guard восстановил runtime cache, SHA-256 persistent и runtime копий совпал байт-в-байт; после запуска Podkop сервисы работали.
+- `lkg-subnets.lst` подключён в `podkop.main.local_subnet_lists`; после reload Telegram CIDR присутствовали в `PodkopTable/podkop_subnets`.
+- Во время reboot-тестов на Redmi обнаружено отдельное intermittent cold-start состояние при включённом штатном WAN interface monitoring Podkop и `badwan_reload_delay='2000'`: Podkop/sing-box формально были запущены, guard LKG/cache и nftables проходили проверки, но Telegram мог не работать.
+- В сломанном состоянии текущий runtime cache успешно прошёл `podkop-guard refresh-test` с offline cold-start validation, а sing-box config содержал корректное правило Telegram → `main-out` → `bind_interface: awg0`; это не подтвердило проблему в persistent LKG/cache guard.
+- Увеличение `badwan_reload_delay` до `20000` дало нормальный cold boot; отключение `enable_badwan_interface_monitoring` также дало нормальный cold boot. На этой конкретной конфигурации контролируемый `ifdown wan; sleep 10; ifup wan` восстановил `wan` и `awg0`, а Podkop продолжил работать без ручного reload.
+- Наблюдение задокументировано нейтрально как возможный startup race. Оно похоже по классу на открытый upstream issue `itdoginfo/podkop#360`, но тождественность проблемы не доказана и не заявляется.
+- README переработан из подробного журнала тестов в пользовательскую документацию: добавлена компактная таблица проверенных конфигураций, раздел обновления и отдельный troubleshooting по cold start/WAN monitoring. Английская версия синхронизирована.
+- Stable installer теперь привязан к собственному release tag (`v0.2.4`) вместо постоянной загрузки worker/init из `main`; `PODKOP_GUARD_BASE_URL` сохранён как явный override для другой ветки/зеркала.
+- Installer дополнительно сверяет версию скачанного worker со своей версией и прекращает установку при несовпадении.
+- Release workflow сделан version-agnostic: убран hardcode текста для v0.2.3, обновлён default tag, добавлена проверка версии installer и release-pinned source; сообщения больше не утверждают, что GitHub Releases технически immutable — workflow лишь запрещает повторно использовать существующий tag/release.
+
 ## 0.2.3 — 2026-09-08
 
 Исправление утечки тестовых процессов sing-box, обнаруженной при дополнительной проверке на втором Cudy TR3000.
@@ -39,7 +59,7 @@
 - SHA-256 `lkg.srs`, `lkg-subnets.lst` и `cache.db` до и после повторной установки совпали; persistent LKG не изменён.
 - Состояние сервиса сохранено: `RUNNING`, автозапуск `ENABLED`, procd-daemon продолжил работу, `podkop_runtime=ready`, `refresh_due=no`.
 - После финальной повторной установки `podkop-guard verify-lkg` снова завершился с кодом `0`.
-- Добавлен ручной GitHub Actions workflow `Create release`, аналогичный используемому в `c0dx-theme`: он сверяет tag с версией worker, проверяет shell-синтаксис и согласованность README/CHANGELOG, формирует release notes из текущей секции changelog и создаёт неизменяемый GitHub Release только при отсутствии существующего tag/release.
+- Добавлен ручной GitHub Actions workflow `Create release`, аналогичный используемому в `c0dx-theme`: он сверяет tag с версией worker, проверяет shell-синтаксис и согласованность README/CHANGELOG, формирует release notes из текущей секции changelog и создаёт GitHub Release только при отсутствии существующего tag/release.
 
 ## 0.2.1 — 2026-08-27
 
