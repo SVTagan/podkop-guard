@@ -12,9 +12,9 @@ This is an independent project and is not affiliated with the Podkop developers.
 
 ## Status
 
-Current version: **0.2.2**.
+Current version: **0.2.3**.
 
-The full pipeline has been validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22** system:
+The full cold-start/reboot pipeline was initially validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22** system:
 
 - `refresh-test` successfully processed all 14 Community Lists used on the test router;
 - the combined LKG passed compile/decompile round-trip validation without differences;
@@ -23,9 +23,18 @@ The full pipeline has been validated on a real **Cudy TR3000 v1 / OpenWrt 24.10.
 - the full `refresh-test` took about 15 seconds and did not change the SHA-256 of any persistent LKG file;
 - a real OpenWrt reboot was performed: `podkop-guard` at `START=98` restored the cache before Podkop started at `START=99`;
 - after reboot, sing-box runtime came up, LKG subnets were loaded into nftables, and the tested routed services remained functional;
-- `status`, `verify-lkg`, and `refresh-test` were exercised through LuCI Custom Commands; v0.2.2 fixes BusyBox `mktemp` compatibility for `verify-lkg` and `derive-subnets`.
+- `status`, `verify-lkg`, and `refresh-test` were exercised through LuCI Custom Commands.
 
-This validates the specific tested configuration; it is not a guarantee of compatibility with every OpenWrt, Podkop, or sing-box version.
+Additional compatibility testing was performed on a second **Cudy TR3000 v1 / OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1** system:
+
+- preflight confirmed `Podkop START=99`, VPN mode via `podkop.main.connection_type='vpn'`, interface `awg0`, and the same set of 14 Community Lists;
+- the v0.2.2 installer completed successfully and created the 4 LuCI Custom Commands automatically;
+- `refresh-test` completed with exit code `0` in about 16 seconds; 1160 unconditional CIDRs were derived and 8 conditional CIDRs from 2 rules were skipped;
+- persistent `refresh` completed with exit code `0`, producing a 19157-byte `lkg.srs`, a 1160-entry `lkg-subnets.lst`, and a 131072-byte `cache.db`;
+- after adding `lkg-subnets.lst` and reloading Podkop, `podkop_runtime=ready` and Telegram subnets were present in `PodkopTable/podkop_subnets`;
+- this second-router test exposed a v0.2.2 bug: the offline validator could leave an orphan test sing-box process because it was started through the background shell function `run_nice`; v0.2.3 launches the validator directly through `nice` so `$!` refers to the process that is later terminated.
+
+These results validate the specific tested configurations; they are not a guarantee of compatibility with every OpenWrt, Podkop, or sing-box version.
 
 ## What it does
 
@@ -45,7 +54,7 @@ Since `/tmp` is volatile, `podkop-guard` keeps a validated copy at:
 /etc/podkop-guard/cache.db
 ```
 
-Its OpenWrt init service runs at `START=98`, immediately before Podkop 0.7.21 (`START=99`), and restores the cache before Podkop starts. If sing-box is already running, the restore is skipped.
+Its OpenWrt init service runs at `START=98`, immediately before Podkop (`START=99` on the tested 0.7.21 and 0.7.22 versions), and restores the cache before Podkop starts. If sing-box is already running, the restore is skipped.
 
 ### Periodic validated refresh
 
@@ -116,10 +125,8 @@ A plain Podkop Local Subnet List cannot represent conditions such as `network` o
 
 Tested on:
 
-- Cudy TR3000 v1;
-- OpenWrt 24.10.5;
-- Podkop 0.7.21;
-- sing-box 1.12.22.
+- Cudy TR3000 v1 / OpenWrt 24.10.5 / Podkop 0.7.21 / sing-box 1.12.22;
+- Cudy TR3000 v1 / OpenWrt 24.10.4 / Podkop 0.7.22-r1 / sing-box 1.12.22-r1.
 
 Required components:
 
@@ -247,7 +254,7 @@ If Community Lists are changed while the current LKG is less than 24 hours old, 
 
 VPN download fallback is used only when the main Podkop section is detected as VPN mode and `podkop.main.interface` is set.
 
-The `START=98 → Podkop START=99` boot order was verified for Podkop 0.7.21. Re-check init order after major Podkop upgrades.
+The `START=98 → Podkop START=99` boot order was verified for Podkop 0.7.21 and 0.7.22. Re-check init order after major Podkop upgrades.
 
 The project does not attempt to guarantee recovery from a corrupted persistent LKG or incompatible future changes to sing-box cache/rule-set formats.
 
