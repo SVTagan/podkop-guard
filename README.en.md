@@ -12,7 +12,9 @@ This is an independent project and is not part of or affiliated with Podkop.
 
 ## Status
 
-Current version: **0.2.4**.
+Current stable version: **0.2.4**.
+
+> The experimental `feature/watchdog-observe-only` branch includes a one-shot, **read-only** `podkop-guard watchdog-check` command. This is not a background watchdog or a v0.3.0 release. Do not run the development installer over an existing installation.
 
 Validated real-world configurations:
 
@@ -311,4 +313,4 @@ See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+The experimental watchdog branch uses GPLv3 for the combined work; see [LICENSE](LICENSE). The original MIT notice is preserved in [LICENSE.MIT](LICENSE.MIT), and upstream attribution is in [THIRD_PARTY.md](THIRD_PARTY.md).
