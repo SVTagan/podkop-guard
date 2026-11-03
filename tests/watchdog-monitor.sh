@@ -112,4 +112,18 @@ for args in '0 0' '31 0' '2 301' 'abc 0'; do
     [ "$rc" -eq 2 ] || { printf 'FAIL invalid arguments %s rc=%s\n' "$args" "$rc" >&2; exit 1; }
 done
 passed=$((passed + 1))
-printf 'PASS numeric-validation\nPASS: %s deterministic monitor scenarios\n' "$passed"
+printf 'PASS numeric-validation\n'
+
+# In continuous mode an invalid interval must fail before entering the loop.
+for seconds in 0 4 301 abc; do
+    set +e
+    PODKOP_GUARD_WATCH_INTERVAL="$seconds" sh "$script" watchdog-observe >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || {
+        printf 'FAIL continuous interval %s returned %s\n' "$seconds" "$rc" >&2
+        exit 1
+    }
+done
+passed=$((passed + 1))
+printf 'PASS continuous-interval-safety\nPASS: %s deterministic monitor scenarios\n' "$passed"
