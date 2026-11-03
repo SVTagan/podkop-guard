@@ -910,6 +910,199 @@ watchdog_check() {
     return 2
 }
 
+
+# Bounded RAM-only monitor. This command never signals processes or modifies
+# UCI, nftables, service state, cache/LKG or files. "CONFIRMED" means repeated
+# local observations, not proof of a root cause or broken Internet.
+watch_monitor_number() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+watch_monitor_now() {
+    local whole rest
+    [ -r "$WATCH_MONITOR_UPTIME_FILE" ] || return 1
+    read -r whole rest < "$WATCH_MONITOR_UPTIME_FILE" || return 1
+    whole=${whole%%.*}
+    watch_monitor_number "$whole" || return 1
+    WATCH_MONITOR_NOW=$whole
+}
+
+watchdog_monitor() {
+    local cycles interval threshold grace check_script sample_output sample_rc
+    local sample_no state payload pid rest now armed_pid last_pid hold_until
+    local missing_active streak streak_kind phase confirmations startup_deadline
+    local stopped
+
+    [ "$#" -le 2 ] || {
+        err "usage: podkop-guard watchdog-monitor [cycles 1..30] [interval_seconds 0..300]"
+        return 2
+    }
+    cycles="${1:-6}"
+    interval="${2:-20}"
+    threshold="${PODKOP_GUARD_WATCH_THRESHOLD:-3}"
+    grace="${PODKOP_GUARD_WATCH_GRACE:-180}"
+    WATCH_MONITOR_UPTIME_FILE="${PODKOP_GUARD_WATCH_UPTIME_FILE:-/proc/uptime}"
+    check_script="${PODKOP_GUARD_WATCH_CHECK_SCRIPT:-$0}"
+
+    for payload in "$cycles" "$interval" "$threshold" "$grace"; do
+        watch_monitor_number "$payload" || { err "invalid monitor numeric argument"; return 2; }
+    done
+    [ "$cycles" -ge 1 ] && [ "$cycles" -le 30 ] &&
+    [ "$interval" -ge 0 ] && [ "$interval" -le 300 ] &&
+    [ "$threshold" -ge 2 ] && [ "$threshold" -le 10 ] &&
+    [ "$grace" -ge 0 ] && [ "$grace" -le 600 ] || {
+        err "monitor limits: cycles=1..30 interval=0..300 threshold=2..10 grace=0..600"
+        return 2
+    }
+    [ -r "$check_script" ] || { err "monitor check script is not readable"; return 2; }
+    watch_monitor_now || { err "cannot read monotonic /proc/uptime"; return 2; }
+
+    startup_deadline=$((WATCH_MONITOR_NOW + grace))
+    hold_until=$startup_deadline
+    armed_pid=""
+    last_pid=""
+    missing_active=0
+    streak=0
+    streak_kind=""
+    confirmations=0
+    stopped=0
+    trap 'stopped=1' TERM INT
+
+    printf 'MONITOR mode=observe-only cycles=%s interval=%ss threshold=%s grace=%ss\n' \
+        "$cycles" "$interval" "$threshold" "$grace"
+    sample_no=1
+    while [ "$sample_no" -le "$cycles" ] && [ "$stopped" -eq 0 ]; do
+        if ! watch_monitor_now; then
+            printf 'MONITOR sample=%s/%s state=UNKNOWN phase=UNKNOWN reason=uptime_unavailable\n' \
+                "$sample_no" "$cycles"
+            streak=0
+            streak_kind=""
+            sample_no=$((sample_no + 1))
+            [ "$sample_no" -le "$cycles" ] && [ "$interval" -gt 0 ] && sleep "$interval"
+            continue
+        fi
+        now=$WATCH_MONITOR_NOW
+        sample_output=$(sh "$check_script" watchdog-check 2>&1)
+        sample_rc=$?
+        state=UNKNOWN
+        pid=none
+        case "$sample_output" in
+            'WATCHDOG state='*)
+                payload=${sample_output#WATCHDOG state=}
+                state=${payload%% *}
+                case " $sample_output " in
+                    *' pid='*)
+                        rest=${sample_output#* pid=}
+                        pid=${rest%% *}
+                        ;;
+                esac
+                ;;
+        esac
+        case "$state:$sample_rc" in
+            HEALTHY_SAMPLED:0|INACTIVE:0|TRANSITION:0|SUSPECT_DNS_TIMEOUT:1|SUSPECT_PROCESS_MISSING:1|UNKNOWN:2) ;;
+            *) state=UNKNOWN ;;
+        esac
+        case "$state" in
+            HEALTHY_SAMPLED|SUSPECT_DNS_TIMEOUT)
+                if ! watch_monitor_number "$pid"; then state=UNKNOWN; fi
+                ;;
+        esac
+
+        # A changed procd PID invalidates previously armed DNS results.
+        if watch_monitor_number "$pid"; then
+            if [ -n "$last_pid" ] && [ "$last_pid" != "$pid" ]; then
+                armed_pid=""
+                hold_until=$((now + grace))
+                streak=0
+                streak_kind=""
+            fi
+            last_pid=$pid
+        fi
+
+        phase=UNKNOWN
+        case "$state" in
+            HEALTHY_SAMPLED)
+                armed_pid=$pid
+                missing_active=0
+                streak=0
+                streak_kind=""
+                phase=HEALTHY
+                ;;
+            INACTIVE)
+                armed_pid=""
+                last_pid=""
+                missing_active=0
+                streak=0
+                streak_kind=""
+                phase=INACTIVE
+                ;;
+            TRANSITION)
+                armed_pid=""
+                missing_active=0
+                streak=0
+                streak_kind=""
+                hold_until=$((now + grace))
+                phase=TRANSITION
+                ;;
+            UNKNOWN)
+                streak=0
+                streak_kind=""
+                phase=UNKNOWN
+                ;;
+            SUSPECT_PROCESS_MISSING|SUSPECT_DNS_TIMEOUT)
+                if [ "$state" = SUSPECT_PROCESS_MISSING ]; then
+                    if [ "$missing_active" -eq 0 ]; then
+                        hold_until=$((now + grace))
+                        missing_active=1
+                    fi
+                else
+                    missing_active=0
+                fi
+                if [ "$now" -lt "$startup_deadline" ] && [ -z "$armed_pid" ]; then
+                    streak=0
+                    streak_kind=""
+                    phase=STARTUP_GRACE
+                elif [ "$now" -lt "$hold_until" ]; then
+                    streak=0
+                    streak_kind=""
+                    phase=TRANSITION_GRACE
+                elif [ "$state" = SUSPECT_DNS_TIMEOUT ] && [ "$armed_pid" != "$pid" ]; then
+                    streak=0
+                    streak_kind=""
+                    phase=WAITING_FOR_BASELINE
+                else
+                    if [ "$streak_kind" != "$state" ]; then
+                        streak=0
+                        streak_kind=$state
+                    fi
+                    streak=$((streak + 1))
+                    if [ "$streak" -ge "$threshold" ]; then
+                        phase=CONFIRMED
+                        if [ "$streak" -eq "$threshold" ]; then
+                            confirmations=$((confirmations + 1))
+                            printf 'MONITOR_EVENT confirmed=%s state=%s pid=%s samples=%s action=none\n' \
+                                "$confirmations" "$state" "$pid" "$streak"
+                        fi
+                    else
+                        phase=SUSPECT
+                    fi
+                fi
+                ;;
+        esac
+        printf 'MONITOR sample=%s/%s state=%s phase=%s pid=%s streak=%s\n' \
+            "$sample_no" "$cycles" "$state" "$phase" "$pid" "$streak"
+        if [ "$sample_no" -lt "$cycles" ] && [ "$interval" -gt 0 ]; then
+            sleep "$interval"
+        fi
+        sample_no=$((sample_no + 1))
+    done
+    trap - TERM INT
+    printf 'MONITOR_END completed=%s confirmations=%s action=none\n' \
+        "$((sample_no - 1))" "$confirmations"
+    return 0
+}
+
+
 usage() {
     cat <<'EOF'
 Usage: podkop-guard <command>
@@ -923,6 +1116,7 @@ Commands:
   cache-restore   Manually restore cache while sing-box is stopped
   boot-restore    Safe boot-time cache restore (skips when not applicable)
   watchdog-check  One-shot observe-only sing-box/Podkop runtime sample
+  watchdog-monitor [cycles] [interval]  Bounded RAM-only observer (default 6 x 20s)
   daemon          Run the periodic validated refresh worker
   version         Print version
 
@@ -941,6 +1135,7 @@ case "${1:-}" in
     cache-restore) cache_restore ;;
     boot-restore) boot_restore ;;
     watchdog-check) watchdog_check ;;
+    watchdog-monitor) shift; watchdog_monitor "$@" ;;
     daemon) daemon_loop ;;
     version|--version|-V) echo "$VERSION" ;;
     help|--help|-h|'') usage ;;
