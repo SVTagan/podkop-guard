@@ -9,6 +9,8 @@ on:
       - podkop-guard
       - tests/watchdog-check.sh
       - tests/watchdog-monitor.sh
+      - tests/watchdog-init.sh
+      - podkop-guard.init
       - .github/workflows/watchdog-check.yml
   workflow_dispatch:
 
@@ -26,6 +28,7 @@ jobs:
           sh -n podkop-guard
           sh -n tests/watchdog-check.sh
           sh -n tests/watchdog-monitor.sh
+          sh -n tests/watchdog-init.sh
           sh -n podkop-guard.init
           if command -v busybox >/dev/null 2>&1; then
             busybox sh -n podkop-guard
@@ -34,3 +37,4 @@ jobs:
         run: |
           sh tests/watchdog-check.sh ./podkop-guard
           sh tests/watchdog-monitor.sh ./podkop-guard
+          sh tests/watchdog-init.sh ./podkop-guard.init
