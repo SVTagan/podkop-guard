@@ -842,14 +842,61 @@ watch_probe_dns() {
     fi
 }
 
+
+# Identify actual Podkop jobs, never just a stale list_update.pid.
+# These checks suppress a suspected failure; they do not assert health.
+watch_maintenance_active() {
+    local proc_root list_pid_file pid cmd proc
+    proc_root="${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}"
+    list_pid_file="${PODKOP_GUARD_WATCH_LIST_PID_FILE:-/var/run/podkop_list_update.pid}"
+
+    if [ -r "$list_pid_file" ]; then
+        read -r pid < "$list_pid_file" || pid=""
+        case "$pid" in
+            ''|*[!0-9]*) pid="" ;;
+        esac
+        if [ -n "$pid" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+            cmd=$(tr '\000' ' ' < "$proc_root/$pid/cmdline" 2>/dev/null)
+            case "$cmd" in
+                *'podkop list_update'*) WATCH_MAINTENANCE="list_update"; return 0 ;;
+            esac
+        fi
+    fi
+
+    # Cron/manual list_update may have no PID file.
+    for proc in "$proc_root"/[0-9]*/cmdline; do
+        [ -r "$proc" ] || continue
+        cmd=$(tr '\000' ' ' < "$proc" 2>/dev/null)
+        case "$cmd" in
+            *'podkop list_update'*) WATCH_MAINTENANCE="list_update"; return 0 ;;
+            *'/usr/bin/podkop reload'*|*'/usr/bin/podkop restart'*|*'/usr/bin/podkop start'*|*'/usr/bin/podkop stop'*)
+                WATCH_MAINTENANCE="podkop_lifecycle"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# A nearly-full conntrack table can delay local probes; suppress a definitive
+# hang diagnosis if direct evidence of pressure exists.
+watch_conntrack_pressure() {
+    local base count max
+    base="${PODKOP_GUARD_WATCH_CONNTRACK_ROOT:-/proc/sys/net/netfilter}"
+    [ -r "$base/nf_conntrack_count" ] && [ -r "$base/nf_conntrack_max" ] || return 1
+    read -r count < "$base/nf_conntrack_count" || return 1
+    read -r max < "$base/nf_conntrack_max" || return 1
+    case "$count:$max" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    [ "$max" -gt 0 ] && [ "$count" -ge $((max - max / 20)) ]
+}
+
 watchdog_check() {
     local tool shutdown check_pid rc
     WATCH_PID="none"
     WATCH_RUNNING="unknown"
     WATCH_NFT="unknown"
     WATCH_DNS="skipped"
+    WATCH_MAINTENANCE=""
 
-    for tool in ubus jsonfilter nft jq nslookup uci awk grep; do
+    for tool in ubus jsonfilter nft jq nslookup uci awk grep tr; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             printf 'WATCHDOG state=UNKNOWN reason=missing_tool:%s\n' "$tool"
             return 2
@@ -870,6 +917,10 @@ watchdog_check() {
         return 2
     fi
     if [ "$rc" -ne 0 ]; then
+        if watch_maintenance_active; then
+            printf 'WATCHDOG state=TRANSITION reason=%s pid=none nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_NFT"
+            return 0
+        fi
         printf 'WATCHDOG state=SUSPECT_PROCESS_MISSING pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
         return 1
     fi
@@ -903,6 +954,14 @@ watchdog_check() {
         return 0
     fi
     if [ "$WATCH_DNS" = "timeout" ]; then
+        if watch_maintenance_active; then
+            printf 'WATCHDOG state=TRANSITION reason=%s pid=%s dns=timeout nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_PID" "$WATCH_NFT"
+            return 0
+        fi
+        if watch_conntrack_pressure; then
+            printf 'WATCHDOG state=UNKNOWN reason=conntrack_pressure pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+            return 2
+        fi
         printf 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
         return 1
     fi
