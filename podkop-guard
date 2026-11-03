@@ -782,7 +782,6 @@ status() {
     printf 'refresh_interval=%s\n' "$REFRESH_INTERVAL"
 }
 
-
 # Experimental observe-only runtime probe. It never signals a process, modifies
 # UCI/nftables or starts/stops Podkop. Three observations are NOT a full end-to-end
 # connectivity check: client LAN traffic can differ from router-local probes.
@@ -805,42 +804,7 @@ watch_nft_table() {
     local tables
     WATCH_NFT="unknown"
     tables=$(nft list tables 2>/dev/null) || return 0
-    if printf '%s\n' "$tables" | grep -q '^[[:space:]]*table inet PodkopTable[[:space:]]*
-Usage: podkop-guard <command>
-
-Commands:
-  status          Show current guard/LKG state
-  verify-lkg      Inspect the persistent LKG SRS
-  derive-subnets  Rebuild Local Subnet LKG from persistent lkg.srs
-  refresh-test    Build and fully validate new candidates without saving them
-  refresh         Build, validate and atomically commit a new persistent LKG
-  cache-restore   Manually restore cache while sing-box is stopped
-  boot-restore    Safe boot-time cache restore (skips when not applicable)
-  watchdog-check  One-shot observe-only sing-box/Podkop runtime sample
-  daemon          Run the periodic validated refresh worker
-  version         Print version
-
-The periodic worker checks once per hour and refreshes no more than once per
-24 hours after a successful snapshot. Failed refreshes never replace the
-current persistent LKG and are retried on the next hourly check.
-EOF
-}
-
-case "${1:-}" in
-    status) status ;;
-    verify-lkg) verify_lkg ;;
-    derive-subnets) derive_subnets ;;
-    refresh-test) refresh_snapshot 0 ;;
-    refresh) refresh_snapshot 1 ;;
-    cache-restore) cache_restore ;;
-    boot-restore) boot_restore ;;
-    watchdog-check) watchdog_check ;;
-    daemon) daemon_loop ;;
-    version|--version|-V) echo "$VERSION" ;;
-    help|--help|-h|'') usage ;;
-    *) err "unknown command: $1"; usage >&2; exit 2 ;;
-esac
-; then
+    if printf '%s\n' "$tables" | grep -q '^[[:space:]]*table inet PodkopTable[[:space:]]*$'; then
         WATCH_NFT="present"
     else
         WATCH_NFT="absent"
@@ -958,6 +922,7 @@ Commands:
   refresh         Build, validate and atomically commit a new persistent LKG
   cache-restore   Manually restore cache while sing-box is stopped
   boot-restore    Safe boot-time cache restore (skips when not applicable)
+  watchdog-check  One-shot observe-only sing-box/Podkop runtime sample
   daemon          Run the periodic validated refresh worker
   version         Print version
 
@@ -975,6 +940,7 @@ case "${1:-}" in
     refresh) refresh_snapshot 1 ;;
     cache-restore) cache_restore ;;
     boot-restore) boot_restore ;;
+    watchdog-check) watchdog_check ;;
     daemon) daemon_loop ;;
     version|--version|-V) echo "$VERSION" ;;
     help|--help|-h|'') usage ;;
