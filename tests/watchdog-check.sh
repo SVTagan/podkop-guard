@@ -17,7 +17,7 @@ printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":12345}}}
 SH
 cat > "$tmp/bin/jsonfilter" <<'SH'
 #!/bin/sh
-case "$*" in
+case "$4" in
     *'"pid"'*) printf '%s\n' "$WATCH_TEST_PID" ;;
     *'"running"'*) printf '%s\n' "$WATCH_TEST_RUNNING" ;;
     *) exit 9 ;;
