@@ -1199,10 +1199,16 @@ watchdog_monitor() {
 # Continuous observe-only process intended for an opt-in procd instance.
 # Limited RAM state, no filesystem writes and change-only syslog output.
 watchdog_observe() {
+    local interval
+    interval="${PODKOP_GUARD_WATCH_INTERVAL:-20}"
+    watch_monitor_number "$interval" && [ "$interval" -ge 5 ] && [ "$interval" -le 300 ] || {
+        err "continuous observer interval must be 5..300 seconds"
+        return 2
+    }
     PODKOP_GUARD_WATCH_UNBOUNDED=1
     PODKOP_GUARD_WATCH_CHANGES_ONLY=1
     export PODKOP_GUARD_WATCH_UNBOUNDED PODKOP_GUARD_WATCH_CHANGES_ONLY
-    watchdog_monitor 0 "${PODKOP_GUARD_WATCH_INTERVAL:-20}"
+    watchdog_monitor 0 "$interval"
 }
 
 usage() {
