@@ -19,10 +19,13 @@ line=$(sed -n "${counter}p" "$MONITOR_TEST_FIXTURE")
 [ -n "$line" ] || exit 9
 oldifs=$IFS
 IFS='|'
-read -r state pid rc <<EOF
+read -r state pid rc simulated_uptime <<EOF
 $line
 EOF
 IFS=$oldifs
+if [ -n "$simulated_uptime" ]; then
+    printf '%s\n' "$simulated_uptime" > "$MONITOR_TEST_UPTIME_FILE"
+fi
 printf 'WATCHDOG state=%s pid=%s mock=yes\n' "$state" "$pid"
 exit "$rc"
 SH
@@ -40,6 +43,7 @@ run_case() {
     output=$(env \
       MONITOR_TEST_FIXTURE="$tmp/fixture" \
       MONITOR_TEST_COUNTER="$tmp/counter" \
+      MONITOR_TEST_UPTIME_FILE="$tmp/uptime" \
       PODKOP_GUARD_WATCH_CHECK_SCRIPT="$tmp/mock-check" \
       PODKOP_GUARD_WATCH_UPTIME_FILE="$tmp/uptime" \
       PODKOP_GUARD_WATCH_GRACE=0 \
@@ -83,6 +87,8 @@ run_case pid_rearmed     'state=SUSPECT_DNS_TIMEOUT phase=CONFIRMED' 1 "$H" "$T"
 run_case no_baseline     'phase=WAITING_FOR_BASELINE' 0 "$T" "$T" "$T"
 run_case bad_rc          'phase=UNKNOWN' 0 "$H" "SUSPECT_DNS_TIMEOUT|101|0"
 run_case wan_vpn_unknown 'phase=HEALTHY' 0 "$H" "$H" "$H"
+run_case late_probe_rejected 'reason=probe_late' 0 \
+    "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"
 
 # A missing process during the initial boot grace is not confirmed.
 printf '%s\n' "$M" "$M" "$M" > "$tmp/fixture"
