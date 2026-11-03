@@ -7,6 +7,8 @@ case "$script" in /*) ;; *) script="$(pwd)/$script" ;; esac
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/bin"
+mkdir -p "$tmp/proc" "$tmp/netfilter"
+: > "$tmp/list.pid"
 printf '{}\n' > "$tmp/config.json"
 
 cat > "$tmp/bin/ubus" <<'SH'
@@ -67,6 +69,9 @@ case_run() {
     set +e
     output=$(env PATH="$tmp/bin:$PATH" \
         PODKOP_GUARD_WATCH_CONFIG="$tmp/config.json" \
+        PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc" \
+        PODKOP_GUARD_WATCH_LIST_PID_FILE="$tmp/list.pid" \
+        PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/netfilter" \
         WATCH_TEST_DNS="$dns" WATCH_TEST_NFT="$nft" WATCH_TEST_PID="$pid" \
         WATCH_TEST_RUNNING="$running" WATCH_TEST_SHUTDOWN="$shutdown" \
         WATCH_TEST_CONFIG="$config" WATCH_TEST_PROCD="$procd" \
@@ -96,5 +101,34 @@ case_run nft_missing      UNKNOWN                 2 healthy   absent  12345 true
 case_run nft_unavailable  UNKNOWN                 2 healthy   error   12345 true  0 valid up
 case_run procd_error      UNKNOWN                 2 healthy   present 12345 true  0 valid down
 case_run unsupported_cfg  UNKNOWN                 2 healthy   present 12345 true  0 bad   up
+
+
+# A stale PID file is not proof of a running updater.
+printf '321\n' > "$tmp/list.pid"
+case_run stale_updater_pid SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
+
+# Validate PID identity: only an actual podkop list_update job is maintenance.
+mkdir -p "$tmp/proc/321"
+printf '/bin/sh\000/usr/bin/podkop\000list_update\000' > "$tmp/proc/321/cmdline"
+case_run updater_during_dns_timeout TRANSITION 0 timeout present 12345 true 0 valid up
+case_run updater_during_proc_absence TRANSITION 0 healthy present none false 0 valid up
+rm -f "$tmp/list.pid"
+case_run cron_updater_no_pidfile TRANSITION 0 timeout present 12345 true 0 valid up
+
+# A reused PID containing an unrelated command must not mask the failure.
+printf '/bin/sh\000/usr/bin/some-other-tool\000' > "$tmp/proc/321/cmdline"
+printf '321\n' > "$tmp/list.pid"
+case_run recycled_pid_not_maintenance SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
+
+# Protect actual reload/start processes without trusting a stale PID file.
+printf '/bin/sh\000/usr/bin/podkop\000reload\000' > "$tmp/proc/321/cmdline"
+case_run podkop_reload_in_progress TRANSITION 0 timeout present 12345 true 0 valid up
+
+rm -f "$tmp/proc/321/cmdline" "$tmp/list.pid"
+printf '95\n' > "$tmp/netfilter/nf_conntrack_count"
+printf '100\n' > "$tmp/netfilter/nf_conntrack_max"
+case_run conntrack_pressure UNKNOWN 2 timeout present 12345 true 0 valid up
+printf '90\n' > "$tmp/netfilter/nf_conntrack_count"
+case_run conntrack_not_full SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
 
 printf 'PASS: %s observer-only scenarios\n' "$tests"
