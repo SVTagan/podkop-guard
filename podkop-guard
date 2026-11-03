@@ -853,7 +853,7 @@ watch_fakeip() {
     printf '%s\n' "$WATCH_ANSWER" | awk '
         /^Name:[[:space:]]/ { answer = 1; next }
         answer && /^Address:[[:space:]]/ {
-            n = split($2, octet, ".")
+            n = split($2, octet, /\./)
             if (n == 4 && octet[1] == 198 &&
                 (octet[2] == 18 || octet[2] == 19) &&
                 octet[3] ~ /^[0-9]+$/ && octet[4] ~ /^[0-9]+$/ &&
