@@ -24,6 +24,19 @@ start_service() {
     # its /tmp lock/work directory without making service stop unbounded.
     procd_set_param term_timeout 70
     procd_close_instance
+
+    # The experimental watchdog is opt-in. On current installations no UCI
+    # option exists, so the original LKG worker remains the only instance.
+    # A separate instance cannot block an LKG refresh or overwrite its state.
+    if [ "$(uci -q get podkop_guard.settings.watchdog_enabled 2>/dev/null)" = "1" ]; then
+        procd_open_instance watchdog
+        procd_set_param command "$PROG" watchdog-observe
+        procd_set_param respawn 3600 5 5
+        procd_set_param stdout 1
+        procd_set_param stderr 1
+        procd_set_param term_timeout 30
+        procd_close_instance
+    fi
 }
 
 reload_service() {
