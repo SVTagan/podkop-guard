@@ -1,7 +1,10 @@
 #!/bin/ash
 
 # podkop-guard - persistent Last Known Good protection for Podkop/OpenWrt
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
+# Historical LKG portions: Copyright (c) 2026 SVTagan, originally MIT.
+# Watchdog procd PID lookup adapted from podkop-engine (GPL-3.0).
+# See LICENSE, LICENSE.MIT and THIRD_PARTY.md.
 
 VERSION="0.2.4"
 
@@ -777,6 +780,170 @@ status() {
     printf 'startup_grace=%s\n' "$STARTUP_GRACE"
     printf 'check_interval=%s\n' "$CHECK_INTERVAL"
     printf 'refresh_interval=%s\n' "$REFRESH_INTERVAL"
+}
+
+
+# Experimental observe-only runtime probe. It never signals a process, modifies
+# UCI/nftables or starts/stops Podkop. Three observations are NOT a full end-to-end
+# connectivity check: client LAN traffic can differ from router-local probes.
+#
+# PID lookup adapted from podkop-net/podkop-engine failsafe; see THIRD_PARTY.md.
+watch_box_pid() {
+    local services
+    services=$(ubus -t 5 call service list '{"name":"sing-box"}' 2>/dev/null) || return 2
+    [ -n "$services" ] || return 2
+    WATCH_PID=$(jsonfilter -s "$services" -e '@["sing-box"]["instances"]["sing-box.main"]["pid"]' 2>/dev/null) || return 2
+    WATCH_RUNNING=$(jsonfilter -s "$services" -e '@["sing-box"]["instances"]["sing-box.main"]["running"]' 2>/dev/null) || return 2
+    case "$WATCH_PID" in
+        ''|*[!0-9]*) WATCH_PID="none"; return 1 ;;
+    esac
+    [ "$WATCH_RUNNING" = "true" ] || return 1
+    return 0
+}
+
+watch_nft_table() {
+    local tables
+    WATCH_NFT="unknown"
+    tables=$(nft list tables 2>/dev/null) || return 0
+    if printf '%s\n' "$tables" | grep -q '^[[:space:]]*table inet PodkopTable[[:space:]]*
+Usage: podkop-guard <command>
+
+Commands:
+  status          Show current guard/LKG state
+  verify-lkg      Inspect the persistent LKG SRS
+  derive-subnets  Rebuild Local Subnet LKG from persistent lkg.srs
+  refresh-test    Build and fully validate new candidates without saving them
+  refresh         Build, validate and atomically commit a new persistent LKG
+  cache-restore   Manually restore cache while sing-box is stopped
+  boot-restore    Safe boot-time cache restore (skips when not applicable)
+  watchdog-check  One-shot observe-only sing-box/Podkop runtime sample
+  daemon          Run the periodic validated refresh worker
+  version         Print version
+
+The periodic worker checks once per hour and refreshes no more than once per
+24 hours after a successful snapshot. Failed refreshes never replace the
+current persistent LKG and are retried on the next hourly check.
+EOF
+}
+
+case "${1:-}" in
+    status) status ;;
+    verify-lkg) verify_lkg ;;
+    derive-subnets) derive_subnets ;;
+    refresh-test) refresh_snapshot 0 ;;
+    refresh) refresh_snapshot 1 ;;
+    cache-restore) cache_restore ;;
+    boot-restore) boot_restore ;;
+    watchdog-check) watchdog_check ;;
+    daemon) daemon_loop ;;
+    version|--version|-V) echo "$VERSION" ;;
+    help|--help|-h|'') usage ;;
+    *) err "unknown command: $1"; usage >&2; exit 2 ;;
+esac
+; then
+        WATCH_NFT="present"
+    else
+        WATCH_NFT="absent"
+    fi
+}
+
+# Check the answer section, never the nslookup 'Server' banner. This probe is
+# entirely local and should not depend on the selected VPN or external DNS.
+watch_fakeip() {
+    printf '%s\n' "$WATCH_ANSWER" | awk '
+        /^Name:[[:space:]]/ { answer = 1; next }
+        answer && /^Address:[[:space:]]/ {
+            n = split($2, octet, ".")
+            if (n == 4 && octet[1] == 198 &&
+                (octet[2] == 18 || octet[2] == 19) &&
+                octet[3] ~ /^[0-9]+$/ && octet[4] ~ /^[0-9]+$/ &&
+                octet[3] >= 0 && octet[3] <= 255 &&
+                octet[4] >= 0 && octet[4] <= 255) found = 1
+        }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
+watch_probe_dns() {
+    local rc
+    WATCH_ANSWER=$(nslookup -timeout=3 -retry=1 -type=A fakeip.podkop.fyi 127.0.0.42 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ] && watch_fakeip; then
+        WATCH_DNS="fakeip"
+    else
+        case "$WATCH_ANSWER" in
+            *'timed out'*|*'no servers could be reached'*) WATCH_DNS="timeout" ;;
+            *) WATCH_DNS="unconfirmed" ;;
+        esac
+    fi
+}
+
+watchdog_check() {
+    local tool shutdown check_pid rc
+    WATCH_PID="none"
+    WATCH_RUNNING="unknown"
+    WATCH_NFT="unknown"
+    WATCH_DNS="skipped"
+
+    for tool in ubus jsonfilter nft jq nslookup uci awk grep; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            printf 'WATCHDOG state=UNKNOWN reason=missing_tool:%s\n' "$tool"
+            return 2
+        fi
+    done
+
+    watch_nft_table
+    shutdown=$(uci -q get podkop.settings.shutdown_correctly 2>/dev/null)
+    if [ "$shutdown" = "1" ] && [ "$WATCH_NFT" = "absent" ]; then
+        printf 'WATCHDOG state=INACTIVE reason=podkop_stopped nft=%s\n' "$WATCH_NFT"
+        return 0
+    fi
+
+    watch_box_pid
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        printf 'WATCHDOG state=UNKNOWN reason=procd_unavailable nft=%s\n' "$WATCH_NFT"
+        return 2
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf 'WATCHDOG state=SUSPECT_PROCESS_MISSING pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+        return 1
+    fi
+
+    # This initial probe deliberately supports only the observed Podkop FakeIP
+    # inbound. Other DNS layouts must not be declared broken.
+    if [ -n "$PODKOP_GUARD_WATCH_CONFIG" ]; then
+        check_pid="$PODKOP_GUARD_WATCH_CONFIG"
+    else
+        check_pid="/etc/sing-box/config.json"
+    fi
+    if [ ! -r "$check_pid" ] ||
+       ! jq -e '.inbounds[]? | select(.tag == "dns-in" and .listen == "127.0.0.42" and .listen_port == 53)' "$check_pid" >/dev/null 2>&1; then
+        printf 'WATCHDOG state=UNKNOWN reason=unsupported_dns_config pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+        return 2
+    fi
+
+    check_pid="$WATCH_PID"
+    watch_probe_dns
+
+    # The service might have reloaded while nslookup ran. Re-read the PID to
+    # avoid treating a normal transition as failure of the previous process.
+    watch_box_pid
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ "$WATCH_PID" != "$check_pid" ]; then
+        printf 'WATCHDOG state=TRANSITION reason=procd_pid_changed nft=%s\n' "$WATCH_NFT"
+        return 0
+    fi
+    if [ "$WATCH_DNS" = "fakeip" ] && [ "$WATCH_NFT" = "present" ]; then
+        printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present\n' "$WATCH_PID"
+        return 0
+    fi
+    if [ "$WATCH_DNS" = "timeout" ]; then
+        printf 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+        return 1
+    fi
+    printf 'WATCHDOG state=UNKNOWN pid=%s dns=%s nft=%s\n' "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
+    return 2
 }
 
 usage() {
