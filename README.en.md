@@ -14,7 +14,7 @@ This is an independent project and is not part of or affiliated with Podkop.
 
 Current stable version: **0.2.4**.
 
-> The experimental `feature/watchdog-observe-only` branch includes `podkop-guard watchdog-check` (one-shot read-only probe) and `podkop-guard watchdog-monitor [cycles] [interval_seconds]` (bounded RAM-only observations, default 6 samples every 20s). `CONFIRMED` denotes repeated local evidence, not proof of a network outage cause. No restart, service stop, auto-start, or persistent state. This is **not** a background watchdog or v0.3.0 release; run the script from `/tmp` for testing and never use the development installer over the live guard.
+> The experimental `feature/watchdog-observe-only` branch includes `podkop-guard watchdog-check` (one-shot read-only probe) and `podkop-guard watchdog-monitor [cycles] [interval_seconds]` (bounded RAM-only observations, default 6 samples every 20s). `CONFIRMED` denotes repeated local evidence, not proof of a network outage cause. No restart, service stop, or persistent fault counters. A **continuous observe-only** `watchdog-observe` command and independent procd instance have been drafted, **disabled by default** unless `podkop_guard.settings.watchdog_enabled=1` is explicitly set. Continuous mode logs only on state changes and has not been hardware-tested. This is not a v0.3.0 release; run bounded tests from `/tmp`, never use the development installer or enable the procd instance on the live router yet.
 
 Validated real-world configurations:
 
