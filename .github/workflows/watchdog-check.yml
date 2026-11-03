@@ -4,14 +4,6 @@ on:
   push:
     branches:
       - feature/watchdog-observe-only
-  pull_request:
-    paths:
-      - podkop-guard
-      - tests/watchdog-check.sh
-      - tests/watchdog-monitor.sh
-      - tests/watchdog-init.sh
-      - podkop-guard.init
-      - .github/workflows/watchdog-check.yml
   workflow_dispatch:
 
 permissions:
