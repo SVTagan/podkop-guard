@@ -1,0 +1,32 @@
+name: Observe-only watchdog tests
+
+on:
+  push:
+    branches:
+      - feature/watchdog-observe-only
+  pull_request:
+    paths:
+      - podkop-guard
+      - tests/watchdog-check.sh
+      - .github/workflows/watchdog-check.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check shell syntax
+        run: |
+          set -eu
+          sh -n podkop-guard
+          sh -n tests/watchdog-check.sh
+          sh -n podkop-guard.init
+          if command -v busybox >/dev/null 2>&1; then
+            busybox sh -n podkop-guard
+          fi
+      - name: Run deterministic read-only scenarios
+        run: sh tests/watchdog-check.sh ./podkop-guard
