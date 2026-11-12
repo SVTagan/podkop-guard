@@ -16,6 +16,8 @@ Current stable version: **0.2.4**.
 
 > The experimental `feature/watchdog-observe-only` branch includes `podkop-guard watchdog-check` (one-shot read-only probe) and `podkop-guard watchdog-monitor [cycles] [interval_seconds]` (bounded RAM-only observations, default 6 samples every 20s). `CONFIRMED` denotes repeated local evidence, not proof of a network outage cause. No restart, service stop, or persistent fault counters. A **continuous observe-only** `watchdog-observe` command and independent procd instance have been drafted, **disabled by default** unless `podkop_guard.settings.watchdog_enabled=1` is explicitly set. Continuous mode logs only on state changes and has not been hardware-tested. This is not a v0.3.0 release; run bounded tests from `/tmp`, never use the development installer or enable the procd instance on the live router yet.
 
+> **Experimental installer:** supports `opkg`/`apk` (OpenWrt 24.10/25.12), same-filesystem staging, and recovery of worker/init files plus prior running/enabled state on ordinary errors. Verified by isolated GitHub Actions mocks, **not** on actual OpenWrt 25.12. It is **not power-failure atomic**; package installation and optional LuCI custom commands are outside rollback. Persistent LKG files are not replaced or removed. The stable `v0.2.4` installer still targets `opkg`. Do not use this development installer on a production router.
+
 Validated real-world configurations:
 
 | Device | OpenWrt | Podkop | sing-box | Community Lists | Validated |
