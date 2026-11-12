@@ -57,7 +57,7 @@ echo PASS_VM_REAL_WORKER_LKG_NO_SNAPSHOT
 
 # Verify real sing-box SRS and the Guard LKG verification/derivation APIs.
 cat > /tmp/pg-real-srs.json <<'SH'
-{"version":3,"rules":[{"domain_suffix":["example.test"],"ip_cidr":["192.0.2.0/24"]}]}
+{"version":3,"rules":[{"domain_suffix":["example.test"]},{"ip_cidr":["192.0.2.0/24"]}]}
 SH
 if ! sing-box rule-set compile --output /etc/podkop-guard/lkg.srs /tmp/pg-real-srs.json; then
     echo FAIL_VM_SRS_COMPILE >&2
@@ -90,6 +90,25 @@ if ! grep -Fxq '192.0.2.0/24' /etc/podkop-guard/lkg-subnets.lst; then
 fi
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
 echo PASS_VM_REAL_SINGBOX_SRS_ROUNDTRIP
+
+# Regression: combined domain+IP is conditional, so exporting its CIDR as
+# unconditional would be unsafe. A failed derivation preserves prior state.
+mkdir -p /tmp/pg-conditional-lkg
+printf '198.51.100.0/24\n' > /tmp/pg-conditional-lkg/lkg-subnets.lst
+cat > /tmp/pg-conditional-srs.json <<'SH'
+{"version":3,"rules":[{"domain_suffix":["example.test"],"ip_cidr":["192.0.2.0/24"]}]}
+SH
+sing-box rule-set compile --output /tmp/pg-conditional-lkg/lkg.srs /tmp/pg-conditional-srs.json
+if PODKOP_GUARD_DIR=/tmp/pg-conditional-lkg /usr/bin/podkop-guard derive-subnets     > /tmp/pg-conditional-derive.log 2>&1; then
+    echo FAIL_VM_EXPORTED_CONDITIONAL_CIDR >&2
+    exit 1
+fi
+grep -Fxq '198.51.100.0/24' /tmp/pg-conditional-lkg/lkg-subnets.lst
+if grep -Fq '192.0.2.0/24' /tmp/pg-conditional-lkg/lkg-subnets.lst; then
+    echo FAIL_VM_CONDITIONAL_SUBNET_LEAK >&2
+    exit 1
+fi
+echo PASS_VM_CONDITIONAL_CIDR_SKIPPED
 
 # No real Podkop or sing-box service is running. A one-shot observation must
 # not fabricate HEALTHY. UNKNOWN or missing-process are valid here.
