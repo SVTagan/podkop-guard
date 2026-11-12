@@ -2,9 +2,12 @@
 set -u
 
 TAG="podkop-guard"
-VERSION="0.2.4"
-DEFAULT_REF="v${VERSION}"
-BASE_URL="${PODKOP_GUARD_BASE_URL:-https://raw.githubusercontent.com/SVTagan/podkop-guard/${DEFAULT_REF}}"
+VERSION="0.3.0-dev"
+# An experimental installer must NOT silently install from a floating ref.
+# The pinned repository SHA must be provided via PODKOP_GUARD_BASE_URL.
+DEFAULT_REF=""
+BASE_URL="${PODKOP_GUARD_BASE_URL:-}"
+[ -n "$BASE_URL" ] || { printf '[ERROR] The development installer requires a commit-pinned PODKOP_GUARD_BASE_URL.\n' >&2; exit 1; }
 
 # Tests may substitute a fully isolated filesystem tree. In production this
 # variable is unset, so no destination path can change from OpenWrt defaults.
