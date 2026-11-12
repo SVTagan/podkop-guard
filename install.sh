@@ -139,7 +139,9 @@ restore_file() {
     local target="$1" backup="$2" previously_present="$3"
     if [ "$previously_present" -eq 1 ]; then
         [ -f "$backup" ] || return 1
-        cp -p "$backup" "$target" && chmod 0755 "$target"
+        # Restore atomically and preserve the former mode and timestamps.
+        local restore_stage="${target}.rollback.$"
+        cp -p "$backup" "$restore_stage" && mv -f "$restore_stage" "$target"
     else
         rm -f "$target"
     fi
@@ -228,6 +230,8 @@ rollback_update() {
 cleanup() {
     [ -n "$STAGE_WORKER" ] && rm -f "$STAGE_WORKER"
     [ -n "$STAGE_INIT" ] && rm -f "$STAGE_INIT"
+    [ -n "$WORKER_DST" ] && rm -f "${WORKER_DST}.rollback.$"
+    [ -n "$INIT_DST" ] && rm -f "${INIT_DST}.rollback.$"
     if [ "$KEEP_RECOVERY_FILES" -eq 0 ]; then
         [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"
     fi
@@ -294,6 +298,7 @@ fi
 # All preflight and backups complete. From here on EXIT can restore the old
 # files/service, including failures due to an interruption or start failure.
 TRANSACTION_ACTIVE=1
+mkdir -p "$STATE_DIR" || fail "Could not create Guard state directory."
 if [ "$EXISTING_INSTALL" -eq 1 ]; then
     stop_service || fail "Existing Guard refused to stop; aborting update."
 fi
