@@ -64,6 +64,11 @@ if ! sing-box rule-set compile --output /etc/podkop-guard/lkg.srs /tmp/pg-real-s
     exit 1
 fi
 echo PASS_VM_SRS_COMPILE
+echo VM_SRS_INPUT
+cat /tmp/pg-real-srs.json
+sing-box rule-set decompile --output /tmp/pg-real-inspected.json /etc/podkop-guard/lkg.srs
+echo VM_SRS_DECOMPILED
+cat /tmp/pg-real-inspected.json
 if ! /usr/bin/podkop-guard verify-lkg > /tmp/pg-real-verify 2>&1; then
     cat /tmp/pg-real-verify >&2
     echo FAIL_VM_GUARD_VERIFY >&2
