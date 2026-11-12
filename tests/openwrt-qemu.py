@@ -15,6 +15,8 @@ child = pexpect.spawn(
     [
         "-m", "384", "-smp", "2", "-nographic", "-monitor", "none",
         "-drive", f"file={image},format=raw,if=virtio,snapshot=on",
+        # Read-only ext4 fixture bundle made from this exact GitHub checkout.
+        "-drive", "file=openwrt-test-bundle.img,format=raw,if=virtio,readonly=on",
         "-nic", "user,model=virtio",
         "-no-reboot",
     ],
@@ -90,5 +92,15 @@ start_service() {
     run("""! ubus call service list '{"name":"pg-vm-test"}' | grep -q '"first"'""")
     print("PASS: real procd stops both named instances", flush=True)
     print("QEMU_25_12_PASS", flush=True)
+
+    # A disposable guest is allowed to update its own /usr/bin and init.d.
+    # The host machine and user's AX6000 have no connection to these files.
+    run("mkdir -p /mnt/pg-bundle")
+    run("mount -t ext4 -o ro /dev/vdb /mnt/pg-bundle")
+    run("test -r /mnt/pg-bundle/openwrt-installer-e2e.sh")
+    run("test -r /mnt/pg-bundle/install.sh")
+    run("test -r /mnt/pg-bundle/podkop-guard.init")
+    run("sh /mnt/pg-bundle/openwrt-installer-e2e.sh", timeout=240)
+    print("QEMU_INSTALLER_E2E_PASS", flush=True)
 finally:
     child.close(force=True)
