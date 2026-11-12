@@ -168,6 +168,9 @@ fi
 echo PASS_VM_UPGRADE
 
 # Opt-in under real procd, then opt out. Both runs are VM-local.
+# A standalone UCI config file is intentionally absent from stock OpenWrt;
+# explicitly create it before trying to set podkop_guard.settings.
+: > /etc/config/podkop_guard
 uci -q set podkop_guard.settings=guard
 uci -q set podkop_guard.settings.watchdog_enabled=1
 /etc/init.d/podkop-guard restart
