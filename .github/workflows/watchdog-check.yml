@@ -22,6 +22,7 @@ jobs:
           sh -n tests/watchdog-monitor.sh
           sh -n tests/watchdog-init.sh
           sh -n tests/install-transaction.sh
+          sh -n tests/srs-compat.sh
           sh -n install.sh
           sh -n podkop-guard.init
           if command -v busybox >/dev/null 2>&1; then
@@ -33,3 +34,4 @@ jobs:
           sh tests/watchdog-monitor.sh ./podkop-guard
           sh tests/watchdog-init.sh ./podkop-guard.init
           sh tests/install-transaction.sh ./install.sh
+          sh tests/srs-compat.sh ./podkop-guard
