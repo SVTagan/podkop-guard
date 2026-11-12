@@ -55,15 +55,34 @@ grep -q '^cache_snapshot=missing$' /tmp/pg-real-status
 grep -q '^startup_grace=300$' /tmp/pg-real-status
 echo PASS_VM_REAL_WORKER_LKG_NO_SNAPSHOT
 
-# Verify the real sing-box SRS format and real Guard LKG handling.
+# Verify real sing-box SRS and the Guard LKG verification/derivation APIs.
 cat > /tmp/pg-real-srs.json <<'SH'
 {"version":3,"rules":[{"domain_suffix":["example.test"],"ip_cidr":["192.0.2.0/24"]}]}
 SH
-sing-box rule-set compile --output /etc/podkop-guard/lkg.srs /tmp/pg-real-srs.json
-/usr/bin/podkop-guard verify-lkg > /tmp/pg-real-verify
-grep -q '^cidrs=1$' /tmp/pg-real-verify
-/usr/bin/podkop-guard derive-subnets
-grep -Fxq '192.0.2.0/24' /etc/podkop-guard/lkg-subnets.lst
+if ! sing-box rule-set compile --output /etc/podkop-guard/lkg.srs /tmp/pg-real-srs.json; then
+    echo FAIL_VM_SRS_COMPILE >&2
+    exit 1
+fi
+echo PASS_VM_SRS_COMPILE
+if ! /usr/bin/podkop-guard verify-lkg > /tmp/pg-real-verify 2>&1; then
+    cat /tmp/pg-real-verify >&2
+    echo FAIL_VM_GUARD_VERIFY >&2
+    exit 1
+fi
+cat /tmp/pg-real-verify
+if ! grep -q '^cidrs=1$' /tmp/pg-real-verify; then
+    echo FAIL_VM_SRS_CIDR_COUNT >&2
+    exit 1
+fi
+echo PASS_VM_SRS_VERIFY
+if ! /usr/bin/podkop-guard derive-subnets; then
+    echo FAIL_VM_GUARD_DERIVE >&2
+    exit 1
+fi
+if ! grep -Fxq '192.0.2.0/24' /etc/podkop-guard/lkg-subnets.lst; then
+    echo FAIL_VM_CIDR_DERIVE >&2
+    exit 1
+fi
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
 echo PASS_VM_REAL_SINGBOX_SRS_ROUNDTRIP
 
