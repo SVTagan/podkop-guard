@@ -19,6 +19,7 @@ OPENWRT_RELEASE="${TEST_ROOT}/etc/openwrt_release"
 STATE_DIR="${TEST_ROOT}/etc/podkop-guard"
 PKG_MANAGER=""
 PREFLIGHT_ONLY="${PODKOP_GUARD_PREFLIGHT_ONLY:-0}"
+SKIP_LUCI="${PODKOP_GUARD_SKIP_LUCI:-0}"
 
 WORK_DIR=""
 TMP_WORKER=""
@@ -41,6 +42,7 @@ info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 fail() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 case "$PREFLIGHT_ONLY" in 0|1) ;; *) fail "PODKOP_GUARD_PREFLIGHT_ONLY must be 0 or 1." ;; esac
+case "$SKIP_LUCI" in 0|1) ;; *) fail "PODKOP_GUARD_SKIP_LUCI must be 0 or 1." ;; esac
 
 if [ -n "$TEST_ROOT" ]; then
     [ -d "$TEST_ROOT" ] || fail "Test root does not exist."
@@ -87,8 +89,12 @@ pkg_install() {
 
 luci_present=0
 luci_commands_ready=0
-if pkg_installed luci-base || pkg_installed luci-app-commands; then
-    luci_present=1
+if [ "$SKIP_LUCI" != 1 ]; then
+    if pkg_installed luci-base || pkg_installed luci-app-commands; then
+        luci_present=1
+    fi
+else
+    info "LuCI integration will be skipped (PODKOP_GUARD_SKIP_LUCI=1)."
 fi
 
 if [ "$PREFLIGHT_ONLY" = 1 ]; then
@@ -96,7 +102,9 @@ if [ "$PREFLIGHT_ONLY" = 1 ]; then
     for package in curl jq; do
         pkg_installed "$package" || fail "Preflight: package $package is missing (no install attempted)."
     done
-    pkg_installed luci-app-commands && luci_commands_ready=1
+    if [ "$SKIP_LUCI" != 1 ]; then
+        pkg_installed luci-app-commands && luci_commands_ready=1
+    fi
     info "PREFLIGHT_ONLY: package queries only; no package database changes."
 else
     need_pkg_update=0
@@ -117,7 +125,7 @@ else
             pkg_installed "$package" || fail "$package is not installed after package-manager success."
         fi
     done
-    if pkg_installed luci-app-commands; then
+    if [ "$SKIP_LUCI" != 1 ] && pkg_installed luci-app-commands; then
         luci_commands_ready=1
     elif [ "$luci_present" -eq 1 ]; then
         if pkg_install luci-app-commands; then
