@@ -397,4 +397,60 @@ MOCK_MISSING_JQ=0
 export MOCK_MISSING_JQ
 ok 'apk_missing_jq_install'
 
+# Non-mutating audit mode must inspect both files and service flags without
+# stopping the worker, updating packages, writing LuCI or touching LKG.
+setup 1 1 1
+PODKOP_GUARD_PREFLIGHT_ONLY=1
+export PODKOP_GUARD_PREFLIGHT_ONLY
+run_install
+[ "$result" -eq 0 ] || { printf '%s\n' "$output" >&2; exit 1; }
+case "$output" in
+    *'PREFLIGHT_PASS pkg_manager=apk version=0.2.4 existing=1 running=1 enabled=1'*) ;;
+    *) printf 'FAIL: preflight output:\n%s\n' "$output" >&2; exit 1 ;;
+esac
+assert_files old
+assert_state 1 1
+assert_lkg
+assert_no_stage
+[ ! -s "$MOCK_SERVICE_LOG" ] && [ ! -s "$MOCK_UCI_LOG" ] && [ ! -s "$MOCK_PKG_LOG" ] ||
+  { echo 'FAIL: preflight mutated service, UCI or package manager' >&2; exit 1; }
+ok 'apk_preflight_existing_no_writes'
+
+setup 0 0 0
+run_install
+[ "$result" -eq 0 ] || { printf '%s\n' "$output" >&2; exit 1; }
+[ ! -e "$root/usr/bin/podkop-guard" ]
+[ ! -e "$root/etc/init.d/podkop-guard" ]
+[ ! -d "$root/etc/podkop-guard" ]
+[ ! -s "$MOCK_SERVICE_LOG" ] && [ ! -s "$MOCK_UCI_LOG" ] && [ ! -s "$MOCK_PKG_LOG" ]
+ok 'apk_preflight_first_install_no_writes'
+
+setup 1 1 1
+MOCK_DOWNLOAD_FAIL=1
+export MOCK_DOWNLOAD_FAIL
+run_install
+MOCK_DOWNLOAD_FAIL=0
+export MOCK_DOWNLOAD_FAIL
+[ "$result" -ne 0 ]
+assert_files old
+assert_state 1 1
+assert_lkg
+[ ! -s "$MOCK_SERVICE_LOG" ] && [ ! -s "$MOCK_UCI_LOG" ] && [ ! -s "$MOCK_PKG_LOG" ]
+ok 'preflight_failed_download_no_mutations'
+
+setup 1 1 1
+MOCK_MISSING_JQ=1
+export MOCK_MISSING_JQ
+run_install
+MOCK_MISSING_JQ=0
+export MOCK_MISSING_JQ
+[ "$result" -ne 0 ]
+assert_files old
+assert_state 1 1
+[ ! -s "$MOCK_SERVICE_LOG" ] && [ ! -s "$MOCK_UCI_LOG" ] && [ ! -s "$MOCK_PKG_LOG" ]
+ok 'preflight_missing_jq_no_install'
+
+PODKOP_GUARD_PREFLIGHT_ONLY=0
+export PODKOP_GUARD_PREFLIGHT_ONLY
+
 printf 'PASS: %s installer scenarios\n' "$passed"
