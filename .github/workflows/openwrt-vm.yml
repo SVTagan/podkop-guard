@@ -1,0 +1,35 @@
+name: OpenWrt 25.12 QEMU verification
+
+on:
+  push:
+    branches:
+      - feature/watchdog-observe-only
+    paths:
+      - tests/openwrt-qemu.py
+      - .github/workflows/openwrt-vm.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  openwrt-25-12:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install isolated QEMU test dependencies
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect
+      - name: Download official OpenWrt 25.12.6 (x86_64 BIOS ext4)
+        run: |
+          set -eu
+          curl -fL --retry 3 \
+            https://downloads.openwrt.org/releases/25.12.6/targets/x86/64/openwrt-25.12.6-x86-64-generic-ext4-combined.img.gz \
+            -o openwrt.img.gz
+          printf 'f8538784d0288b4133a99ac2a68443e4922ffde6343e80df56a5882364b9d499  openwrt.img.gz\n' | sha256sum -c -
+          gzip -d openwrt.img.gz
+      - name: Boot OpenWrt and verify real apk/procd
+        run: |
+          /usr/bin/python3 tests/openwrt-qemu.py openwrt.img
