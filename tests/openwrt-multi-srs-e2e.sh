@@ -168,6 +168,16 @@ if sh /mnt/pg-bundle/podkop-guard refresh-test \
     exit 1
 fi
 grep -q 'downloaded geoblock.srs directly' "$TEST_DIR/missing-cache.log"
+grep -q 'candidate LKG passed compile/decompile round-trip' "$TEST_DIR/missing-cache.log" || {
+    echo 'FAIL: missing-cache case rejected before reaching cache verification' >&2
+    cat "$TEST_DIR/missing-cache.log" >&2
+    exit 1
+}
+grep -Eq 'candidate cache failed offline cold-start validation|candidate cache validation timed out' "$TEST_DIR/missing-cache.log" || {
+    echo 'FAIL: missing-cache case rejected for an unrelated reason' >&2
+    cat "$TEST_DIR/missing-cache.log" >&2
+    exit 1
+}
 verify_unchanged
 echo PASS_REAL_MISSING_FIFTH_CACHE_REJECTED
 echo PASS_REAL_LKG_PRESERVED_NEGATIVE
@@ -179,6 +189,11 @@ if sh /mnt/pg-bundle/podkop-guard refresh-test \
     echo 'FAIL: nonexistent upstream rule-set accepted' >&2
     exit 1
 fi
+grep -q 'cannot download required Community SRS: not-a-real-category' "$TEST_DIR/missing-source.log" || {
+    echo 'FAIL: missing-source case failed unexpectedly' >&2
+    cat "$TEST_DIR/missing-source.log" >&2
+    exit 1
+}
 verify_unchanged
 echo PASS_REAL_MISSING_SOURCE_REJECTED
 
