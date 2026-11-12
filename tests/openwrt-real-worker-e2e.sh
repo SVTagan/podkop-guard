@@ -1,0 +1,80 @@
+#!/bin/sh
+# Actual podkop-guard 0.3.0-dev source under REAL procd in disposable QEMU.
+# No real Podkop/VPN routing. No network configuration changes.
+set -eu
+
+[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+[ -r /mnt/pg-bundle/podkop-guard ]
+grep -q '^VERSION="0.3.0-dev"' /mnt/pg-bundle/podkop-guard
+[ -r /mnt/pg-bundle/podkop-guard.init ]
+
+# Use the real OpenWrt 25.12 APK database and install the real dependencies
+# instead of simulating 'apk info -e'. This is inside QEMU only.
+apk update
+apk add curl jq sing-box
+
+for dep in curl jq sing-box; do
+    apk info -e "$dep" >/dev/null || {
+        echo "FAIL_REAL_DEP_MISSING $dep" >&2
+        exit 1
+    }
+done
+command -v curl
+command -v jq
+command -v sing-box
+sing-box version | head -n 1
+echo PASS_VM_REAL_APK_DEPENDENCIES
+
+# Stop the earlier harmless fixture worker before replacing its source.
+# The init file remains the exact dev init from the checked-out branch.
+/etc/init.d/podkop-guard stop
+cp /mnt/pg-bundle/podkop-guard /usr/bin/podkop-guard
+chmod 0755 /usr/bin/podkop-guard
+[ "$(/usr/bin/podkop-guard version)" = 0.3.0-dev ]
+[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+echo PASS_VM_REAL_WORKER_VERSION
+
+# No LKG snapshot in this VM: boot-restore must skip safely. The real status
+# command should report missing LKG and the expected configured interval.
+/usr/bin/podkop-guard boot-restore
+/usr/bin/podkop-guard status > /tmp/pg-real-status
+grep -q '^podkop-guard 0.3.0-dev$' /tmp/pg-real-status
+grep -q '^cache_snapshot=missing$' /tmp/pg-real-status
+grep -q '^startup_grace=300$' /tmp/pg-real-status
+echo PASS_VM_REAL_WORKER_LKG_NO_SNAPSHOT
+
+# No real Podkop or sing-box service is running. A one-shot observation must
+# not fabricate HEALTHY. UNKNOWN or missing-process are valid here.
+set +e
+/usr/bin/podkop-guard watchdog-check > /tmp/pg-real-watch-check 2>&1
+rc=$?
+set -e
+case "$rc" in 1|2) ;; *) echo "FAIL_REAL_CHECK_RC $rc" >&2; cat /tmp/pg-real-watch-check; exit 1 ;; esac
+grep -q '^WATCHDOG state=' /tmp/pg-real-watch-check
+if grep -q 'state=HEALTHY_SAMPLED' /tmp/pg-real-watch-check; then
+    echo "FAIL_REAL_FALSE_HEALTHY" >&2
+    exit 1
+fi
+# Bounded observation has no recovery, regardless of missing VPN.
+PODKOP_GUARD_WATCH_GRACE=180 \
+    /usr/bin/podkop-guard watchdog-monitor 3 0 > /tmp/pg-real-monitor
+grep -q '^MONITOR_END completed=3 confirmations=0 action=none$' /tmp/pg-real-monitor
+echo PASS_VM_REAL_WORKER_OBSERVE_ONLY
+
+# The real LKG daemon starts with default 300s startup grace. It must remain
+# running under real procd, without performing any refresh in this short test.
+# The independent watchdog uses the same actual source, opt-in only.
+uci -q set podkop_guard.settings.watchdog_enabled=1
+/etc/init.d/podkop-guard start
+sleep 2
+svc=$(ubus call service list '{"name":"podkop-guard"}')
+printf '%s\n' "$svc" | grep -q '"instance1"'
+printf '%s\n' "$svc" | grep -q '"watchdog"'
+printf '%s\n' "$svc" | grep -q '"running": true'
+/etc/init.d/podkop-guard running
+[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+echo PASS_VM_REAL_WORKER_PROCD_BOTH
+
+# Do not wait 60 seconds to stop the long sleeping LKG worker: the bounded
+# workflow terminates the disposable QEMU instance after the check.
+echo OPENWRT_REAL_WORKER_E2E_PASS
