@@ -10,7 +10,12 @@ grep -q "DISTRIB_RELEASE='25.12.6'" /etc/openwrt_release
 [ ! -e /tmp/pg-srs-cache-e2e ]
 
 # Real packages and real HTTP server; no mock programs in PATH.
-apk add curl jq sing-box uhttpd >/tmp/pg-srs-install.log 2>&1 || {
+apk update >/tmp/pg-srs-install.log 2>&1 || {
+    echo 'FAIL: apk update inside QEMU' >&2
+    cat /tmp/pg-srs-install.log >&2
+    exit 1
+}
+apk add curl jq sing-box uhttpd >>/tmp/pg-srs-install.log 2>&1 || {
     echo 'FAIL: installing real VM-only tools' >&2
     cat /tmp/pg-srs-install.log >&2
     exit 1
