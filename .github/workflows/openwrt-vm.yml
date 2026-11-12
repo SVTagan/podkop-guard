@@ -6,6 +6,9 @@ on:
       - feature/watchdog-observe-only
     paths:
       - tests/openwrt-qemu.py
+      - tests/openwrt-installer-e2e.sh
+      - install.sh
+      - podkop-guard.init
       - .github/workflows/openwrt-vm.yml
   workflow_dispatch:
 
@@ -21,7 +24,7 @@ jobs:
       - name: Install isolated QEMU test dependencies
         run: |
           sudo apt-get -qq update
-          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect
+          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect e2fsprogs
       - name: Download official OpenWrt 25.12.6 (x86_64 BIOS ext4)
         run: |
           set -eu
@@ -30,6 +33,17 @@ jobs:
             -o openwrt.img.gz
           printf 'f8538784d0288b4133a99ac2a68443e4922ffde6343e80df56a5882364b9d499  openwrt.img.gz\n' | sha256sum -c -
           gzip -d openwrt.img.gz
-      - name: Boot OpenWrt and verify real apk/procd
+      - name: Create isolated read-only fixture disk
+        run: |
+          set -eu
+          mkdir -p vm-input
+          cp install.sh podkop-guard.init vm-input/
+          cp tests/openwrt-installer-e2e.sh vm-input/
+          sh -n vm-input/install.sh
+          sh -n vm-input/openwrt-installer-e2e.sh
+          truncate -s 16M openwrt-test-bundle.img
+          mkfs.ext4 -F -q -d vm-input openwrt-test-bundle.img
+      - name: Boot OpenWrt and verify real apk/procd/installer
+
         run: |
           /usr/bin/python3 tests/openwrt-qemu.py openwrt.img
