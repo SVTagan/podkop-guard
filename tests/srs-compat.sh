@@ -47,12 +47,19 @@ ruleset_extract_plain_cidrs "$tmp/arrays.json" > "$tmp/cidrs"
 [ "$(cat "$tmp/cidrs")" = '192.0.2.0/24' ]
 echo PASS_SRS_UNCONDITIONAL_CIDR
 
-cat > "$tmp/conditional.json" <<'EOF'
+cat > "$tmp/or-group.json" <<'EOF'
 {"version":3,"rules":[{"domain_suffix":["example.test"],"ip_cidr":["192.0.2.0/24"]}]}
+EOF
+[ "$(ruleset_extract_plain_cidrs "$tmp/or-group.json")" = '192.0.2.0/24' ]
+[ "$(ruleset_conditional_metrics "$tmp/or-group.json")" = '0 0' ]
+echo PASS_SRS_DOMAIN_IP_OR_GROUP
+
+cat > "$tmp/conditional.json" <<'EOF'
+{"version":3,"rules":[{"domain_suffix":["example.test"],"ip_cidr":["192.0.2.0/24"],"network":"tcp"}]}
 EOF
 [ -z "$(ruleset_extract_plain_cidrs "$tmp/conditional.json")" ]
 [ "$(ruleset_conditional_metrics "$tmp/conditional.json")" = '1 1' ]
-echo PASS_SRS_CONDITIONAL_CIDR_EXCLUDED
+echo PASS_SRS_AND_CONSTRAINT_CIDR_EXCLUDED
 
 cat > "$tmp/default.json" <<'EOF'
 {"version":4,"rules":[{"type":"default","ip_cidr":"203.0.113.0/24"},{"ip_cidr":"192.0.2.0/24","network":"tcp"}]}
@@ -61,4 +68,4 @@ EOF
 [ "$(ruleset_conditional_metrics "$tmp/default.json")" = '1 1' ]
 echo PASS_SRS_DEFAULT_TYPE_AND_EXTRA_FIELD
 
-echo 'PASS: 5 deterministic SRS compatibility scenarios'
+echo 'PASS: 6 deterministic SRS compatibility scenarios'
