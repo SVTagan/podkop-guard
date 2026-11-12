@@ -308,6 +308,27 @@ assert_files new
 assert_state 1 1
 ok 'luci_optional_failure_does_not_rollback'
 
+# Controlled upgrades must be able to leave every LuCI command and
+# the optional luci-app-commands package entirely untouched.
+setup 1 1 1
+MOCK_LUCI=1
+PODKOP_GUARD_SKIP_LUCI=1
+export MOCK_LUCI PODKOP_GUARD_SKIP_LUCI
+run_install
+[ "$result" -eq 0 ] || { printf '%s\n' "$output" >&2; exit 1; }
+assert_files new
+assert_state 1 1
+assert_lkg
+[ ! -s "$MOCK_UCI_LOG" ]
+if grep -q 'luci-app-commands' "$MOCK_PKG_LOG"; then
+    echo 'FAIL: skip_luci triggered package-manager operation' >&2
+    exit 1
+fi
+MOCK_LUCI=0
+PODKOP_GUARD_SKIP_LUCI=0
+export MOCK_LUCI PODKOP_GUARD_SKIP_LUCI
+ok 'skip_luci_no_uci_or_optional_package_mutations'
+
 # Before touching a running worker, wrong version must fail preflight.
 setup 1 1 1
 cp "$fixture/new_worker" "$tmp/good-worker"
