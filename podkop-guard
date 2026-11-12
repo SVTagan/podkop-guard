@@ -6,7 +6,7 @@
 # Watchdog procd PID lookup adapted from podkop-engine (GPL-3.0).
 # See LICENSE, LICENSE.MIT and THIRD_PARTY.md.
 
-VERSION="0.2.4"
+VERSION="0.3.0-dev"
 
 STATE_DIR="${PODKOP_GUARD_DIR:-/etc/podkop-guard}"
 LKG_SRS="$STATE_DIR/lkg.srs"
