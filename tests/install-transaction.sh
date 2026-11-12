@@ -164,6 +164,8 @@ setup() {
     : > "$MOCK_SERVICE_LOG"
     : > "$MOCK_UCI_LOG"
     if [ "$old" = 1 ]; then
+        mkdir -p "$root/etc/podkop-guard"
+        printf 'known-good-lkg-marker\n' > "$root/etc/podkop-guard/lkg-untouched.txt"
         cp "$fixture/old_worker" "$root/usr/bin/podkop-guard"
         cp "$fixture/old_init" "$root/etc/init.d/podkop-guard"
         chmod +x "$root/usr/bin/podkop-guard" "$root/etc/init.d/podkop-guard"
@@ -192,6 +194,10 @@ assert_state() {
     if [ "$running" = 1 ]; then [ -f "$MOCK_STATE/running" ]; else [ ! -e "$MOCK_STATE/running" ]; fi
     if [ "$enabled" = 1 ]; then [ -f "$MOCK_STATE/enabled" ]; else [ ! -e "$MOCK_STATE/enabled" ]; fi
 }
+assert_lkg() {
+    [ -r "$root/etc/podkop-guard/lkg-untouched.txt" ] &&
+    [ "$(cat "$root/etc/podkop-guard/lkg-untouched.txt")" = 'known-good-lkg-marker' ]
+}
 assert_no_stage() {
     [ ! -e "$root/usr/bin/podkop-guard.stage" ]
     [ "$(find "$root" -name '*.stage.*' -o -name '*.rollback.*' | wc -l)" -eq 0 ]
@@ -206,6 +212,7 @@ for states in '0 0' '0 1' '1 0' '1 1'; do
     [ "$result" -eq 0 ] || { printf '%s\n' "$output" >&2; exit 1; }
     assert_files new
     assert_state "$1" "$2"
+    assert_lkg
     assert_no_stage
     ok "upgrade_running_${1}_enabled_${2}"
 done
@@ -229,6 +236,7 @@ for stage in after_worker after_init after_start; do
     [ "$result" -ne 0 ] || { printf 'FAIL injection %s unexpectedly succeeded\n' "$stage" >&2; exit 1; }
     assert_files old
     assert_state 1 1
+    assert_lkg
     assert_no_stage
     ok "rollback_${stage}"
 done
@@ -280,6 +288,53 @@ export MOCK_LUCI MOCK_LUCI_COMMIT_FAIL
 assert_files new
 assert_state 1 1
 ok 'luci_optional_failure_does_not_rollback'
+
+# Before touching a running worker, wrong version must fail preflight.
+setup 1 1 1
+cp "$fixture/new_worker" "$tmp/good-worker"
+sed 's/VERSION="0.2.4"/VERSION="0.9.9"/' "$tmp/good-worker" > "$fixture/new_worker"
+run_install
+[ "$result" -ne 0 ]
+assert_files old
+assert_state 1 1
+assert_lkg
+[ ! -s "$MOCK_SERVICE_LOG" ]
+cp "$tmp/good-worker" "$fixture/new_worker"
+ok 'worker_version_mismatch_refused'
+
+# Invalid shell syntax in a downloaded candidate is also a preflight failure.
+setup 1 1 1
+printf "\nif [ then\n" >> "$fixture/new_worker"
+run_install
+[ "$result" -ne 0 ]
+assert_files old
+assert_state 1 1
+assert_lkg
+[ ! -s "$MOCK_SERVICE_LOG" ]
+cp "$tmp/good-worker" "$fixture/new_worker"
+ok 'downloaded_script_syntax_invalid'
+
+# The first-install rollback removes its partial worker+init instead of
+# leaving a half-working, auto-enabled service.
+setup 0 0 0
+PODKOP_GUARD_TEST_FAILURE=after_worker
+export PODKOP_GUARD_TEST_FAILURE
+run_install
+unset PODKOP_GUARD_TEST_FAILURE
+[ "$result" -ne 0 ]
+[ ! -e "$root/usr/bin/podkop-guard" ]
+[ ! -e "$root/etc/init.d/podkop-guard" ]
+assert_state 0 0
+assert_no_stage
+ok 'first_install_atomic_rollback'
+
+# Ensure opkg was really selected in the tests above, not just coincidentally
+# passing the package helper mocks.
+setup 1 1 1
+run_install
+[ "$result" -eq 0 ]
+case "$output" in *'Detected package manager: opkg'*) ;; *) echo 'FAIL: opkg not selected' >&2; exit 1 ;; esac
+ok 'opkg_package_manager'
 
 # Ensure the alternate apk path works (OpenWrt 25.12).
 cp "$tmp/apk-stub" "$mock/apk"
