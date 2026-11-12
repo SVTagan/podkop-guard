@@ -153,7 +153,7 @@ restore_file() {
     if [ "$previously_present" -eq 1 ]; then
         [ -f "$backup" ] || return 1
         # Restore atomically and preserve the former mode and timestamps.
-        local restore_stage="${target}.rollback.$"
+        local restore_stage="${target}.rollback.$$"
         cp -p "$backup" "$restore_stage" && mv -f "$restore_stage" "$target"
     else
         rm -f "$target"
@@ -241,10 +241,13 @@ rollback_update() {
     return 1
 }
 cleanup() {
-    [ -n "$STAGE_WORKER" ] && rm -f "$STAGE_WORKER"
-    [ -n "$STAGE_INIT" ] && rm -f "$STAGE_INIT"
-    [ -n "$WORKER_DST" ] && rm -f "${WORKER_DST}.rollback.$"
-    [ -n "$INIT_DST" ] && rm -f "${INIT_DST}.rollback.$"
+    # A read-only preflight must never remove any target-path stage file.
+    if [ "$PREFLIGHT_ONLY" != 1 ]; then
+        [ -n "$STAGE_WORKER" ] && rm -f "$STAGE_WORKER"
+        [ -n "$STAGE_INIT" ] && rm -f "$STAGE_INIT"
+        [ -n "$WORKER_DST" ] && rm -f "${WORKER_DST}.rollback.$$"
+        [ -n "$INIT_DST" ] && rm -f "${INIT_DST}.rollback.$$"
+    fi
     if [ "$KEEP_RECOVERY_FILES" -eq 0 ]; then
         [ -n "$WORK_DIR" ] && rm -rf "$WORK_DIR"
     fi
