@@ -8,6 +8,18 @@ set -eu
 grep -q '^VERSION="0.3.0-dev"' /mnt/pg-bundle/podkop-guard
 [ -r /mnt/pg-bundle/podkop-guard.init ]
 
+# Give this disposable guest an outbound route through QEMU user-mode NAT.
+# Stock OpenWrt images often treat their only NIC as static LAN (192.168.1.1),
+# so a networkless boot test cannot reach official APK repositories.
+guest_if=br-lan
+ip link show "$guest_if" >/dev/null 2>&1 || guest_if=eth0
+ip link set "$guest_if" up
+ip addr add 10.0.2.15/24 dev "$guest_if" 2>/dev/null || true
+ip route replace default via 10.0.2.2 dev "$guest_if"
+printf 'nameserver 10.0.2.3\n' > /tmp/resolv.conf
+printf 'nameserver 10.0.2.3\n' > /tmp/resolv.conf.d/resolv.conf.auto
+echo "VM_NAT_READY interface=$guest_if"
+
 # Use the real OpenWrt 25.12 APK database and install the real dependencies
 # instead of simulating 'apk info -e'. This is inside QEMU only.
 apk update
