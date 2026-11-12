@@ -18,6 +18,8 @@ Current stable version: **0.2.4**.
 
 > **Experimental installer:** supports `opkg`/`apk` (OpenWrt 24.10/25.12), same-filesystem staging, and recovery of worker/init files plus prior running/enabled state on ordinary errors. Verified by isolated GitHub Actions mocks, **not** on actual OpenWrt 25.12. It is **not power-failure atomic**; package installation and optional LuCI custom commands are outside rollback. Persistent LKG files are not replaced or removed. The stable `v0.2.4` installer still targets `opkg`. Do not use this development installer on a production router.
 
+**Safe installer audit:** `PODKOP_GUARD_PREFLIGHT_ONLY=1` validates downloaded worker/init, version, syntax, installed package manager/dependencies and current `running/enabled`. It does not replace binaries, modify UCI, install packages or stop any service. Temporary downloaded files remain under `/tmp` and are removed. The default URL still targets stable `v0.2.4`; testing this development branch requires an explicit commit-pinned `PODKOP_GUARD_BASE_URL`. `PREFLIGHT_PASS` validates preconditions only, **not** a subsequent live installation or rollback.
+
 Validated real-world configurations:
 
 | Device | OpenWrt | Podkop | sing-box | Community Lists | Validated |
