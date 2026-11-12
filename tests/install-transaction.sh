@@ -111,7 +111,7 @@ SH
 cat > "$fixture/new_worker" <<'SH'
 #!/bin/sh
 # podkop-guard - persistent Last Known Good protection for Podkop/OpenWrt
-VERSION="0.2.4"
+VERSION="0.3.0-dev"
 # fixture=new-worker
 case "${1:-}" in
     status) printf 'new fixture is healthy\n' ;;
@@ -311,7 +311,7 @@ ok 'luci_optional_failure_does_not_rollback'
 # Before touching a running worker, wrong version must fail preflight.
 setup 1 1 1
 cp "$fixture/new_worker" "$tmp/good-worker"
-sed 's/VERSION="0.2.4"/VERSION="0.9.9"/' "$tmp/good-worker" > "$fixture/new_worker"
+sed 's/VERSION="0.3.0-dev"/VERSION="0.9.9"/' "$tmp/good-worker" > "$fixture/new_worker"
 run_install
 [ "$result" -ne 0 ]
 assert_files old
@@ -405,7 +405,7 @@ export PODKOP_GUARD_PREFLIGHT_ONLY
 run_install
 [ "$result" -eq 0 ] || { printf '%s\n' "$output" >&2; exit 1; }
 case "$output" in
-    *'PREFLIGHT_PASS pkg_manager=apk version=0.2.4 existing=1 running=1 enabled=1'*) ;;
+    *'PREFLIGHT_PASS pkg_manager=apk version=0.3.0-dev existing=1 running=1 enabled=1'*) ;;
     *) printf 'FAIL: preflight output:\n%s\n' "$output" >&2; exit 1 ;;
 esac
 assert_files old
