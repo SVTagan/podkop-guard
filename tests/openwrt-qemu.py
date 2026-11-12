@@ -102,6 +102,11 @@ start_service() {
     run("test -r /mnt/pg-bundle/podkop-guard.init")
     run("sh /mnt/pg-bundle/openwrt-installer-e2e.sh", timeout=240)
     print("QEMU_INSTALLER_E2E_PASS", flush=True)
+    # Real SRS fixture cache test runs before the worker procd smoke test,
+    # while the previous fixture instance is stopped.
+    run("test -r /mnt/pg-bundle/openwrt-multi-srs-e2e.sh")
+    run("sh /mnt/pg-bundle/openwrt-multi-srs-e2e.sh", timeout=240)
+    print("QEMU_MULTI_SRS_CACHE_E2E_PASS", flush=True)
     run("test -r /mnt/pg-bundle/podkop-guard")
     run("test -r /mnt/pg-bundle/openwrt-real-worker-e2e.sh")
     run("sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh", timeout=330)
