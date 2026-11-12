@@ -15,6 +15,7 @@ PODKOP_INIT="${TEST_ROOT}/etc/init.d/podkop"
 OPENWRT_RELEASE="${TEST_ROOT}/etc/openwrt_release"
 STATE_DIR="${TEST_ROOT}/etc/podkop-guard"
 PKG_MANAGER=""
+PREFLIGHT_ONLY="${PODKOP_GUARD_PREFLIGHT_ONLY:-0}"
 
 WORK_DIR=""
 TMP_WORKER=""
@@ -36,6 +37,7 @@ KEEP_RECOVERY_FILES=0
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 fail() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+case "$PREFLIGHT_ONLY" in 0|1) ;; *) fail "PODKOP_GUARD_PREFLIGHT_ONLY must be 0 or 1." ;; esac
 
 if [ -n "$TEST_ROOT" ]; then
     [ -d "$TEST_ROOT" ] || fail "Test root does not exist."
@@ -86,32 +88,42 @@ if pkg_installed luci-base || pkg_installed luci-app-commands; then
     luci_present=1
 fi
 
-need_pkg_update=0
-pkg_installed curl || need_pkg_update=1
-pkg_installed jq || need_pkg_update=1
-if [ "$luci_present" -eq 1 ] && ! pkg_installed luci-app-commands; then
-    need_pkg_update=1
-fi
-if [ "$need_pkg_update" -eq 1 ]; then
-    if ! pkg_update; then
-        warn "$PKG_MANAGER update failed; continuing with cached package lists."
+if [ "$PREFLIGHT_ONLY" = 1 ]; then
+    # Strict read-only target audit. Never refresh/install packages here.
+    for package in curl jq; do
+        pkg_installed "$package" || fail "Preflight: package $package is missing (no install attempted)."
+    done
+    pkg_installed luci-app-commands && luci_commands_ready=1
+    info "PREFLIGHT_ONLY: package queries only; no package database changes."
+else
+    need_pkg_update=0
+    pkg_installed curl || need_pkg_update=1
+    pkg_installed jq || need_pkg_update=1
+    if [ "$luci_present" -eq 1 ] && ! pkg_installed luci-app-commands; then
+        need_pkg_update=1
     fi
-fi
-for package in curl jq; do
-    if ! pkg_installed "$package"; then
-        info "Installing $package..."
-        pkg_install "$package" || fail "$package installation failed."
-        pkg_installed "$package" || fail "$package is not installed after package-manager success."
+    if [ "$need_pkg_update" -eq 1 ]; then
+        if ! pkg_update; then
+            warn "$PKG_MANAGER update failed; continuing with cached package lists."
+        fi
     fi
-done
-if pkg_installed luci-app-commands; then
-    luci_commands_ready=1
-elif [ "$luci_present" -eq 1 ]; then
-    if pkg_install luci-app-commands; then
+    for package in curl jq; do
+        if ! pkg_installed "$package"; then
+            info "Installing $package..."
+            pkg_install "$package" || fail "$package installation failed."
+            pkg_installed "$package" || fail "$package is not installed after package-manager success."
+        fi
+    done
+    if pkg_installed luci-app-commands; then
         luci_commands_ready=1
-    else
-        warn "Optional luci-app-commands installation failed; proceeding."
+    elif [ "$luci_present" -eq 1 ]; then
+        if pkg_install luci-app-commands; then
+            luci_commands_ready=1
+        else
+            warn "Optional luci-app-commands installation failed; proceeding."
+        fi
     fi
+    
 fi
 
 for cmd in logger nice sort cmp date mktemp grep tail touch sync sed head cp mv chmod tr; do
@@ -268,6 +280,25 @@ worker_version=$(sed -n 's/^VERSION="\([^"]*\)".*/\1/p' "$TMP_WORKER" | head -n 
 
 [ -d "${WORKER_DST%/*}" ] && [ -d "${INIT_DST%/*}" ] ||
     fail "Installation destination directories are missing."
+# Preflight must terminate before copying stage files into the overlay.
+if [ "$PREFLIGHT_ONLY" = 1 ]; then
+    worker_here=0
+    init_here=0
+    [ -e "$WORKER_DST" ] && worker_here=1
+    [ -e "$INIT_DST" ] && init_here=1
+    [ "$worker_here" -eq "$init_here" ] || fail "Preflight: partial installation."
+    [ "$init_here" -eq 0 ] || [ -x "$INIT_DST" ] || fail "Preflight: init is not executable."
+    [ "$worker_here" -eq 0 ] || [ -x "$WORKER_DST" ] || fail "Preflight: worker is not executable."
+    running=0
+    enabled=0
+    if [ "$init_here" -eq 1 ]; then
+        service_running && running=1
+        service_enabled && enabled=1
+    fi
+    info "PREFLIGHT_PASS pkg_manager=$PKG_MANAGER version=$worker_version existing=$init_here running=$running enabled=$enabled"
+    info "No installed files, services, UCI, LKG or packages were modified."
+    exit 0
+fi
 if [ -e "$WORKER_DST" ]; then
     HAD_WORKER=1
     cp -p "$WORKER_DST" "$BACKUP_WORKER" || fail "Cannot back up worker."
