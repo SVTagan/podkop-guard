@@ -226,6 +226,54 @@ validate_srs() {
     return 0
 }
 
+
+# sing-box can decompile singleton domain_suffix/ip_cidr values as strings,
+# and lower binary rule-set version to the lowest required version.
+# Compare known rule semantics, not JSON formatting or version numbering.
+ruleset_canonicalize() {
+    local input="$1" output="$2"
+    run_nice jq -S '
+      def as_list: (if type == "array" then . else [.] end) | unique;
+      del(.version)
+      | walk(
+          if type == "object" then
+            with_entries(
+              if (.key == "domain_suffix" or .key == "ip_cidr") and .value != null
+              then .value |= as_list
+              else . end
+            )
+          else . end
+        )
+    ' "$input" > "$output"
+}
+
+# Export only unconditionally matched IP-only rules. A combined
+# domain_suffix + ip_cidr rule is conditional and must not leak into CIDRs.
+ruleset_extract_plain_cidrs() {
+    run_nice jq -r '
+      def items: if type == "array" then .[] else . end;
+      .rules[]?
+      | select(
+          (.type // "default") == "default" and
+          .ip_cidr != null and .domain_suffix == null and
+          ((keys_unsorted - ["type","ip_cidr"]) | length) == 0
+        )
+      | .ip_cidr | items
+    ' "$1"
+}
+
+ruleset_conditional_metrics() {
+    run_nice jq -r '
+      def items: if type == "array" then .[] else . end;
+      def plain:
+        (.type // "default") == "default" and
+        .ip_cidr != null and .domain_suffix == null and
+        ((keys_unsorted - ["type","ip_cidr"]) | length) == 0;
+      [.rules[]? | select(.ip_cidr != null and (plain | not))] as $bad
+      | "\($bad | length) \([$bad[] | .ip_cidr | items] | length)"
+    ' "$1"
+}
+
 build_ruleset_candidate() {
     local lists tag srs json count special_count skipped_cidrs
     local combined canonical roundtrip roundtrip_canonical candidate_srs candidate_subnets
@@ -268,7 +316,7 @@ build_ruleset_candidate() {
         return 1
     fi
 
-    run_nice jq -S . "$combined" > "$canonical" || return 1
+    ruleset_canonicalize "$combined" "$canonical" || return 1
 
     if ! run_nice sing-box rule-set compile --output "$candidate_srs" "$combined" >/dev/null 2>&1; then
         err "cannot compile combined LKG SRS"
@@ -280,25 +328,30 @@ build_ruleset_candidate() {
         return 1
     fi
 
-    run_nice jq -S . "$roundtrip" > "$roundtrip_canonical" || return 1
+    if ! run_nice jq -e '
+        (.version | type == "number") and (.version >= 1) and
+        (.rules | type == "array")
+    ' "$roundtrip" >/dev/null 2>&1; then
+        err "invalid compiled rule-set after round-trip"
+        return 1
+    fi
+    ruleset_canonicalize "$roundtrip" "$roundtrip_canonical" || return 1
 
     if ! cmp -s "$canonical" "$roundtrip_canonical"; then
         err "LKG SRS round-trip verification failed"
         return 1
     fi
 
-    if ! run_nice jq -r '
-        .rules[]?
-        | select(((keys_unsorted - ["domain_suffix","ip_cidr"]) | length) == 0)
-        | .ip_cidr[]?
-    ' "$combined" | sort -u > "$candidate_subnets"; then
+    if ! ruleset_extract_plain_cidrs "$combined" | sort -u > "$candidate_subnets"; then
         err "cannot derive subnet LKG"
         return 1
     fi
 
     count="$(wc -l < "$candidate_subnets" | tr -d ' ')"
-    special_count="$(run_nice jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"]) | length) > 0)] | length' "$combined")"
-    skipped_cidrs="$(run_nice jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"]) | length) > 0) | .ip_cidr[]?] | length' "$combined")"
+    local metrics
+    metrics="$(ruleset_conditional_metrics "$combined")" || return 1
+    special_count="${metrics%% *}"
+    skipped_cidrs="${metrics#* }"
 
     [ "${count:-0}" -gt 0 ] || {
         err "derived subnet candidate is empty; refusing this refresh"
@@ -581,9 +634,13 @@ verify_lkg() {
     jq -r '
       "version=" + (.version|tostring),
       "rules=" + (.rules|length|tostring),
-      "domains=" + ([.rules[]? | .domain_suffix[]?]|length|tostring),
-      "cidrs=" + ([.rules[]? | .ip_cidr[]?]|length|tostring),
-      "special_rules=" + ([.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)]|length|tostring)
+      "domains=" + ([.rules[]? | .domain_suffix? | select(. != null) | if type == "array" then .[] else . end] | length | tostring),
+      "cidrs=" + ([.rules[]? | .ip_cidr? | select(. != null) | if type == "array" then .[] else . end] | length | tostring),
+      "special_rules=" + ([.rules[]? | select(
+        ((.type // "default") != "default") or
+        ((keys_unsorted - ["type","domain_suffix","ip_cidr"]) | length) > 0 or
+        (.domain_suffix != null and .ip_cidr != null)
+      )] | length | tostring)
     ' "$json"
 
     rm -f "$json"
@@ -608,15 +665,21 @@ derive_subnets() {
     rc=1
 
     if run_nice sing-box rule-set decompile --output "$json" "$LKG_SRS" >/dev/null 2>&1 &&
-       run_nice jq -r '
-          .rules[]?
-          | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) == 0)
-          | .ip_cidr[]?
-       ' "$json" | sort -u > "$new"; then
+       ruleset_extract_plain_cidrs "$json" | sort -u > "$new"; then
 
         count="$(wc -l < "$new" | tr -d ' ')"
-        special_count="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0)] | length' "$json")"
-        skipped_cidrs="$(jq '[.rules[]? | select(((keys_unsorted - ["domain_suffix","ip_cidr"])|length) > 0) | .ip_cidr[]?] | length' "$json")"
+        if [ "${count:-0}" -eq 0 ]; then
+            warn "no unconditional CIDRs; existing subnet LKG was not replaced"
+            rm -f "$json" "$new"
+            return 1
+        fi
+        local metrics
+        metrics="$(ruleset_conditional_metrics "$json")" || {
+            rm -f "$json" "$new"
+            return 1
+        }
+        special_count="${metrics%% *}"
+        skipped_cidrs="${metrics#* }"
 
         if [ -f "$LKG_SUBNETS" ] && cmp -s "$new" "$LKG_SUBNETS"; then
             log "subnet LKG unchanged ($count CIDRs)"
