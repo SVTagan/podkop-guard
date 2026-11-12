@@ -247,16 +247,16 @@ ruleset_canonicalize() {
     ' "$input" > "$output"
 }
 
-# Export only unconditionally matched IP-only rules. A combined
-# domain_suffix + ip_cidr rule is conditional and must not leak into CIDRs.
+# In sing-box default rules domain_suffix and ip_cidr belong to the same
+# OR group. Extract CIDRs if no other (AND-group) conditions are present.
 ruleset_extract_plain_cidrs() {
     run_nice jq -r '
       def items: if type == "array" then .[] else . end;
       .rules[]?
       | select(
           (.type // "default") == "default" and
-          .ip_cidr != null and .domain_suffix == null and
-          ((keys_unsorted - ["type","ip_cidr"]) | length) == 0
+          .ip_cidr != null and
+          ((keys_unsorted - ["type","domain_suffix","ip_cidr"]) | length) == 0
         )
       | .ip_cidr | items
     ' "$1"
@@ -267,8 +267,8 @@ ruleset_conditional_metrics() {
       def items: if type == "array" then .[] else . end;
       def plain:
         (.type // "default") == "default" and
-        .ip_cidr != null and .domain_suffix == null and
-        ((keys_unsorted - ["type","ip_cidr"]) | length) == 0;
+        .ip_cidr != null and
+        ((keys_unsorted - ["type","domain_suffix","ip_cidr"]) | length) == 0;
       [.rules[]? | select(.ip_cidr != null and (plain | not))] as $bad
       | "\($bad | length) \([$bad[] | .ip_cidr | items] | length)"
     ' "$1"
@@ -638,8 +638,7 @@ verify_lkg() {
       "cidrs=" + ([.rules[]? | .ip_cidr? | select(. != null) | if type == "array" then .[] else . end] | length | tostring),
       "special_rules=" + ([.rules[]? | select(
         ((.type // "default") != "default") or
-        ((keys_unsorted - ["type","domain_suffix","ip_cidr"]) | length) > 0 or
-        (.domain_suffix != null and .ip_cidr != null)
+        ((keys_unsorted - ["type","domain_suffix","ip_cidr"]) | length) > 0
       )] | length | tostring)
     ' "$json"
 
