@@ -347,83 +347,54 @@ assert_state 0 0
 assert_no_stage
 ok 'first_install_atomic_rollback'
 
-# Ensure opkg was really selected in the tests above, not just coincidentally
-# passing the package helper mocks.
+# Ensure opkg was really selected in the tests above.
 setup 1 1 1
 run_install
 [ "$result" -eq 0 ]
-case "$output" in *'Detected package manager: opkg'*) ;; *) echo 'FAIL: opkg not selected' >&2; exit 1 ;; esac
+case "$output" in
+    *'Detected package manager: opkg'*) ;;
+    *) echo 'FAIL: opkg not selected' >&2; exit 1 ;;
+esac
 ok 'opkg_package_manager'
 
-# Check the dependency install path, not only the installed-package query.
+# If jq is missing, use opkg install and verify it became available.
 setup 1 1 1
 MOCK_MISSING_JQ=1
 export MOCK_MISSING_JQ
 run_install
 [ "$result" -eq 0 ]
 [ -f "$MOCK_PKG_DIR/jq" ]
-grep -q '^opkg install jq
-# APK exists in PATH here; swap it into the test bin only for this scenario.
-setup 1 1 1
-run_install
-[ "$result" -eq 0 ]
-case "$output" in *'Detected package manager: apk'*) ;; *) echo 'FAIL: apk not selected' >&2; exit 1 ;; esac
-assert_files new
-assert_state 1 1
-ok 'apk_package_manager'
-
-setup 1 1 1
-MOCK_MISSING_JQ=1
-export MOCK_MISSING_JQ
-run_install
-[ "$result" -eq 0 ]
-[ -f "$MOCK_PKG_DIR/jq" ]
-grep -q '^apk add jq
-
-printf 'PASS: %s installer scenarios\n' "$passed"
- "$MOCK_PKG_LOG"
+grep -q '^opkg install jq$' "$MOCK_PKG_LOG"
 assert_files new
 assert_state 1 1
 MOCK_MISSING_JQ=0
 export MOCK_MISSING_JQ
 ok 'opkg_missing_jq_install'
 
-# Ensure the alternate apk path works (OpenWrt 25.12).
+# Enable the apk fixture only for 25.12-style scenarios.
 cp "$tmp/apk-stub" "$mock/apk"
-# APK exists in PATH here; swap it into the test bin only for this scenario.
 setup 1 1 1
 run_install
 [ "$result" -eq 0 ]
-case "$output" in *'Detected package manager: apk'*) ;; *) echo 'FAIL: apk not selected' >&2; exit 1 ;; esac
+case "$output" in
+    *'Detected package manager: apk'*) ;;
+    *) echo 'FAIL: apk not selected' >&2; exit 1 ;;
+esac
 assert_files new
 assert_state 1 1
 ok 'apk_package_manager'
 
-printf 'PASS: %s installer scenarios\n' "$passed"
- "$MOCK_PKG_LOG"
+setup 1 1 1
+MOCK_MISSING_JQ=1
+export MOCK_MISSING_JQ
+run_install
+[ "$result" -eq 0 ]
+[ -f "$MOCK_PKG_DIR/jq" ]
+grep -q '^apk add jq$' "$MOCK_PKG_LOG"
 assert_files new
 assert_state 1 1
 MOCK_MISSING_JQ=0
 export MOCK_MISSING_JQ
 ok 'apk_missing_jq_install'
-
-printf 'PASS: %s installer scenarios\n' "$passed"
- "$MOCK_PKG_LOG"
-assert_files new
-assert_state 1 1
-MOCK_MISSING_JQ=0
-export MOCK_MISSING_JQ
-ok 'opkg_missing_jq_install'
-
-# Ensure the alternate apk path works (OpenWrt 25.12).
-cp "$tmp/apk-stub" "$mock/apk"
-# APK exists in PATH here; swap it into the test bin only for this scenario.
-setup 1 1 1
-run_install
-[ "$result" -eq 0 ]
-case "$output" in *'Detected package manager: apk'*) ;; *) echo 'FAIL: apk not selected' >&2; exit 1 ;; esac
-assert_files new
-assert_state 1 1
-ok 'apk_package_manager'
 
 printf 'PASS: %s installer scenarios\n' "$passed"
