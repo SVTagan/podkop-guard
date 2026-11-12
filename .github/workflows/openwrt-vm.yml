@@ -8,6 +8,7 @@ on:
       - tests/openwrt-qemu.py
       - tests/openwrt-installer-e2e.sh
       - tests/openwrt-real-worker-e2e.sh
+      - tests/openwrt-multi-srs-e2e.sh
       - podkop-guard
       - install.sh
       - podkop-guard.init
@@ -40,11 +41,29 @@ jobs:
           set -eu
           mkdir -p vm-input
           cp install.sh podkop-guard podkop-guard.init vm-input/
-          cp tests/openwrt-installer-e2e.sh tests/openwrt-real-worker-e2e.sh vm-input/
+          cp tests/openwrt-installer-e2e.sh tests/openwrt-real-worker-e2e.sh tests/openwrt-multi-srs-e2e.sh vm-input/
           sh -n vm-input/install.sh
           sh -n vm-input/podkop-guard
           sh -n vm-input/openwrt-installer-e2e.sh
           sh -n vm-input/openwrt-real-worker-e2e.sh
+          sh -n vm-input/openwrt-multi-srs-e2e.sh
+          mkdir -p vm-input/srs
+          release='2026-11-09_19-01'
+          for item in \
+            'block 12f30ee95cb5d6d3c0d0ad937b0b6aa2ef04ac1c553c2b048fcad106eec0429f' \
+            'cloudflare fbf51d38de31d609385363434d2018351911a59ba87b23ecba772105479cb28a' \
+            'discord 516b6812514646a8e740ed37c474407583a95d469881ec600a4f421a58d01a06' \
+            'telegram 87f6bf28fd5586329abfeb4a856a7515df6ab852e2b39a2c26266881e2f38ba6' \
+            'geoblock 2f041e1797e4e8b8ec2b7a816a602b8fe3153bf0b3714d023a62747bf4672b71'
+          do
+            set -- $item
+            name="$1"
+            hash="$2"
+            curl -fLsS --retry 3 --retry-delay 2 \
+              "https://github.com/itdoginfo/allow-domains/releases/download/${release}/${name}.srs" \
+              -o "vm-input/srs/${name}.srs"
+            printf '%s  %s\n' "$hash" "vm-input/srs/${name}.srs" | sha256sum -c -
+          done
           truncate -s 16M openwrt-test-bundle.img
           mkfs.ext4 -F -q -d vm-input openwrt-test-bundle.img
       - name: Boot OpenWrt and verify real apk/procd/installer
