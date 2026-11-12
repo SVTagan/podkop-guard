@@ -102,5 +102,9 @@ start_service() {
     run("test -r /mnt/pg-bundle/podkop-guard.init")
     run("sh /mnt/pg-bundle/openwrt-installer-e2e.sh", timeout=240)
     print("QEMU_INSTALLER_E2E_PASS", flush=True)
+    run("test -r /mnt/pg-bundle/podkop-guard")
+    run("test -r /mnt/pg-bundle/openwrt-real-worker-e2e.sh")
+    run("sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh", timeout=330)
+    print("QEMU_REAL_WORKER_E2E_PASS", flush=True)
 finally:
     child.close(force=True)
