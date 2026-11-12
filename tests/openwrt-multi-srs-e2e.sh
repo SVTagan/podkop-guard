@@ -9,6 +9,18 @@ grep -q "DISTRIB_RELEASE='25.12.6'" /etc/openwrt_release
 [ -r /mnt/pg-bundle/srs/geoblock.srs ]
 [ ! -e /tmp/pg-srs-cache-e2e ]
 
+# Stock x86 image has its only NIC configured as LAN without a route.
+# This is disposable QEMU user-mode NAT, never a user-router change.
+guest_if=br-lan
+ip link show "$guest_if" >/dev/null 2>&1 || guest_if=eth0
+ip link set "$guest_if" up
+ip addr add 10.0.2.15/24 dev "$guest_if" 2>/dev/null || true
+ip route replace default via 10.0.2.2 dev "$guest_if"
+mkdir -p /tmp/resolv.conf.d
+printf 'nameserver 10.0.2.3\n' > /tmp/resolv.conf
+printf 'nameserver 10.0.2.3\n' > /tmp/resolv.conf.d/resolv.conf.auto
+echo "VM_NAT_READY interface=$guest_if"
+
 # Real packages and real HTTP server; no mock programs in PATH.
 apk update >/tmp/pg-srs-install.log 2>&1 || {
     echo 'FAIL: apk update inside QEMU' >&2
