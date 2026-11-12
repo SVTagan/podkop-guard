@@ -3,7 +3,6 @@
 
 No interaction with a router, real UCI or public services; ephemeral QEMU only.
 """
-import base64
 import re
 import sys
 import time
@@ -75,8 +74,13 @@ start_service() {
     procd_close_instance
 }
 """
-    payload = base64.b64encode(init_script.encode()).decode()
-    run(f"printf '%s' '{payload}' | base64 -d > /etc/init.d/pg-vm-test")
+    # Minimal stock BusyBox has no base64 applet. Use short serial lines
+    # instead of a long command that may overflow the tty input buffer.
+    child.sendline("cat > /etc/init.d/pg-vm-test <<'PG_VM_INIT_EOF'")
+    for line in init_script.rstrip("\n").splitlines():
+        child.sendline(line)
+    child.sendline("PG_VM_INIT_EOF")
+    child.expect(prompt, timeout=30)
     run("chmod +x /etc/init.d/pg-vm-test")
     run("/etc/init.d/pg-vm-test start")
     run("""ubus call service list '{"name":"pg-vm-test"}' | grep -q '"first"'""")
