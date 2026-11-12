@@ -7,6 +7,8 @@ on:
     paths:
       - tests/openwrt-qemu.py
       - tests/openwrt-installer-e2e.sh
+      - tests/openwrt-real-worker-e2e.sh
+      - podkop-guard
       - install.sh
       - podkop-guard.init
       - .github/workflows/openwrt-vm.yml
@@ -37,10 +39,12 @@ jobs:
         run: |
           set -eu
           mkdir -p vm-input
-          cp install.sh podkop-guard.init vm-input/
-          cp tests/openwrt-installer-e2e.sh vm-input/
+          cp install.sh podkop-guard podkop-guard.init vm-input/
+          cp tests/openwrt-installer-e2e.sh tests/openwrt-real-worker-e2e.sh vm-input/
           sh -n vm-input/install.sh
+          sh -n vm-input/podkop-guard
           sh -n vm-input/openwrt-installer-e2e.sh
+          sh -n vm-input/openwrt-real-worker-e2e.sh
           truncate -s 16M openwrt-test-bundle.img
           mkfs.ext4 -F -q -d vm-input openwrt-test-bundle.img
       - name: Boot OpenWrt and verify real apk/procd/installer
