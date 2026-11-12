@@ -20,6 +20,8 @@ Current stable version: **0.2.4**.
 
 Experimental worker and installer report **`0.3.0-dev`** and require an explicit SHA-pinned `PODKOP_GUARD_BASE_URL`. The watchdog remains opt-in; its standalone `/etc/config/podkop_guard` UCI file must be initialized before enabling it. The full worker has not yet undergone integrated hardware testing. [QEMU E2E](https://github.com/SVTagan/podkop-guard/actions/runs/43312895095).
 
+**Controlled upgrade:** setting `PODKOP_GUARD_SKIP_LUCI=1` explicitly disables optional `luci-app-commands` installation and any `luci` UCI modifications. It does **not** prevent worker/init replacement or the Guard service restart. Keep a separate persistent backup of the old worker, init, service state and LKG before upgrading; the installer's transactional backups reside in `/tmp` only.
+
 **Safe installer audit:** `PODKOP_GUARD_PREFLIGHT_ONLY=1` validates downloaded worker/init, version, syntax, installed package manager/dependencies and current `running/enabled`. It does not replace binaries, modify UCI, install packages or stop any service. Temporary downloaded files remain under `/tmp` and are removed. The experimental `0.3.0-dev` installer has **no default download URL**; it requires an explicit commit-pinned `PODKOP_GUARD_BASE_URL`. The stable `v0.2.4` installer remains separate. `PREFLIGHT_PASS` validates preconditions only, **not** a subsequent live installation or rollback.
 
 Validated real-world configurations:
