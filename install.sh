@@ -101,6 +101,7 @@ for package in curl jq; do
     if ! pkg_installed "$package"; then
         info "Installing $package..."
         pkg_install "$package" || fail "$package installation failed."
+        pkg_installed "$package" || fail "$package is not installed after package-manager success."
     fi
 done
 if pkg_installed luci-app-commands; then
