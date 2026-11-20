@@ -20,6 +20,7 @@ jobs:
           sh -n podkop-guard
           sh -n tests/watchdog-check.sh
           sh -n tests/watchdog-monitor.sh
+          sh -n tests/watchdog-classify.sh
           sh -n tests/watchdog-init.sh
           sh -n tests/install-transaction.sh
           sh -n tests/srs-compat.sh
@@ -32,6 +33,7 @@ jobs:
         run: |
           sh tests/watchdog-check.sh ./podkop-guard
           sh tests/watchdog-monitor.sh ./podkop-guard
+          sh tests/watchdog-classify.sh ./podkop-guard
           sh tests/watchdog-init.sh ./podkop-guard.init
           sh tests/install-transaction.sh ./install.sh
           sh tests/srs-compat.sh ./podkop-guard
