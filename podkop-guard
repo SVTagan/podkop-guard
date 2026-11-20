@@ -1401,7 +1401,7 @@ watchdog_evidence() {
     # A local FakeIP reply does NOT prove the encrypted upstream is healthy.
     # Do not infer DoH health from WAN/VPN ordinary HTTPS probes.
     printf 'EVIDENCE local=%s pid=%s wan=%s wan_source=%s vpn=%s vpn_source=%s doh=%s doh_source=not_probed mode=%s\n' \
-        "$local_state" "$local_pid" "$wan" "$wan_source" "$vpn" "$vpn_source" "$doh" "${mode:---metadata}"
+        "$local_state" "$local_pid" "$wan" "$wan_source" "$vpn" "$vpn_source" "$doh" "${mode:-metadata}"
     watchdog_classify "$local_state" "$wan" "$vpn" "$doh"
 }
 
