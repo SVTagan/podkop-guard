@@ -1273,6 +1273,138 @@ watchdog_observe() {
     watchdog_monitor 0 "$interval"
 }
 
+# Stage 6B1: one-shot evidence adapter, NOT wired into watchdog-observe.
+# Default: local sample + netifd/carrier metadata, NO external requests.
+# --live: optional WAN-only NetGuard adapter and active-interface Failover
+# checker; both are diagnostic-only and never modify UCI or services.
+# DoH stays UNKNOWN until an actual validated RFC 8484 probe is implemented.
+watchdog_evidence() {
+    local mode local_output local_rc local_state local_pid payload
+    local wan wan_source wan_json wan_up wan_pending wan_device carrier carrier_file
+    local wan_checker wan_output wan_rc wan_result wan_matches
+    local vpn vpn_source iface vpn_checker vpn_output vpn_rc
+    local doh check_script conn_type
+    mode="${1:-}"
+    [ "$#" -le 1 ] || { err "usage: watchdog-evidence [--live]"; return 2; }
+    case "$mode" in ""|--live) ;; *) err "usage: watchdog-evidence [--live]"; return 2 ;; esac
+
+    check_script="${PODKOP_GUARD_EVIDENCE_CHECK_SCRIPT:-$0}"
+    [ -r "$check_script" ] || { err "evidence local-check script unavailable"; return 2; }
+    local_output=$(sh "$check_script" watchdog-check 2>/dev/null)
+    local_rc=$?
+    local_state=UNKNOWN
+    local_pid=none
+    case "$local_output:$local_rc" in
+        'WATCHDOG state='*)
+            payload=${local_output#WATCHDOG state=}
+            local_state=${payload%% *}
+            case "$local_output" in *" pid="*) local_pid=${local_output#* pid=}; local_pid=${local_pid%% *} ;; esac
+            ;;
+    esac
+    case "$local_state:$local_rc" in
+        HEALTHY_SAMPLED:0|SUSPECT_DNS_TIMEOUT:1|SUSPECT_PROCESS_MISSING:1|INACTIVE:0|TRANSITION:0|UNKNOWN:2) ;;
+        *) local_state=UNKNOWN; local_pid=none ;;
+    esac
+
+    wan=UNKNOWN
+    wan_source=netifd_unverified
+    wan_device=
+    wan_up=unknown
+    wan_pending=unknown
+    if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
+        wan_json=$(ubus -t 5 call network.interface.wan status 2>/dev/null)
+        if [ "$?" -eq 0 ] && [ -n "$wan_json" ]; then
+            wan_up=$(jsonfilter -s "$wan_json" -e '@.up' 2>/dev/null)
+            wan_pending=$(jsonfilter -s "$wan_json" -e '@.pending' 2>/dev/null)
+            wan_device=$(jsonfilter -s "$wan_json" -e '@.l3_device' 2>/dev/null)
+            # An actual physical link down is local evidence of WAN failure.
+            # An UP flag never proves Internet or ISP reachability.
+            case "$wan_device" in
+                ''|*[!a-zA-Z0-9_.:@-]*) wan_device= ;;
+                *)
+                    carrier_file="${PODKOP_GUARD_EVIDENCE_NET_ROOT:-/sys/class/net}/$wan_device/carrier"
+                    carrier=""
+                    [ -r "$carrier_file" ] && read -r carrier < "$carrier_file"
+                    if [ "$wan_up" != true ] && [ "$wan_pending" != true ] && [ "$carrier" = 0 ]; then
+                        wan=DOWN
+                        wan_source=netifd_link_down
+                    fi
+                    ;;
+            esac
+        else
+            wan_source=netifd_unavailable
+        fi
+    else
+        wan_source=netifd_tools_missing
+    fi
+
+    # Optional existing NetGuard WAN-only sampler: requires two HTTPS
+    # successes on distinct pinned IPv4 targets and WAN route evidence.
+    # An all-failed sample alone is UNKNOWN, never proof of ISP outage.
+    if [ "$mode" = --live ] && [ "$wan" != DOWN ]; then
+        wan_checker="${PODKOP_GUARD_EVIDENCE_WAN_CHECKER:-/usr/bin/netguard-wan-check}"
+        if [ -r "$wan_checker" ]; then
+            wan_output=$(sh "$wan_checker" check 2>/dev/null)
+            wan_rc=$?
+            wan_matches=$(printf '%s\n' "$wan_output" | grep -c '^RESULT: ' || true)
+            if [ "$wan_matches" -eq 1 ]; then
+                wan_result=$(printf '%s\n' "$wan_output" | sed -n 's/^RESULT: //p')
+                case "$wan_result:$wan_rc" in
+                    HEALTHY_SAMPLED:0) wan=UP; wan_source=netguard_pinned_https ;;
+                    WAN_LINK_DOWN:1) wan=DOWN; wan_source=netguard_link_down ;;
+                    *) wan=UNKNOWN; wan_source=netguard_unconfirmed ;;
+                esac
+            else
+                wan=UNKNOWN
+                wan_source=netguard_invalid
+            fi
+        else
+            wan_source=netguard_not_installed
+        fi
+    fi
+
+    vpn=UNKNOWN
+    vpn_source=not_probed
+    iface=
+    if command -v uci >/dev/null 2>&1; then
+        conn_type=$(uci -q get podkop.main.connection_type 2>/dev/null)
+        iface=$(uci -q get podkop.main.interface 2>/dev/null)
+    else
+        conn_type=
+    fi
+    if [ "$mode" = --live ] && [ "$conn_type" = vpn ]; then
+        # Only the active configured interface, not the entire VPN pool.
+        # Never change VPN selection, quarantine or Failover state.
+        case "$iface" in
+            awg[0-9]*)
+                case "$iface" in *[!a-zA-Z0-9_]* ) vpn_source=invalid_interface; iface= ;; esac
+                ;;
+            *) iface=; vpn_source=unsupported_interface ;;
+        esac
+        if [ -n "$iface" ]; then
+            vpn_checker="${PODKOP_GUARD_EVIDENCE_VPN_CHECKER:-/usr/bin/podkop-vpn-failover}"
+            if [ -r "$vpn_checker" ]; then
+                vpn_output=$(sh "$vpn_checker" check "$iface" 2>/dev/null)
+                vpn_rc=$?
+                case "$vpn_output:$vpn_rc" in
+                    "$iface: HEALTHY via "*":0") vpn=HEALTHY; vpn_source=failover_active_interface ;;
+                    "$iface: FAILED all targets "*":1") vpn=FAILED; vpn_source=failover_active_interface ;;
+                    *) vpn_source=failover_unconfirmed ;;
+                esac
+            else
+                vpn_source=failover_not_installed
+            fi
+        fi
+    fi
+
+    doh=UNKNOWN
+    # A local FakeIP reply does NOT prove the encrypted upstream is healthy.
+    # Do not infer DoH health from WAN/VPN ordinary HTTPS probes.
+    printf 'EVIDENCE local=%s pid=%s wan=%s wan_source=%s vpn=%s vpn_source=%s doh=%s doh_source=not_probed mode=%s\n' \
+        "$local_state" "$local_pid" "$wan" "$wan_source" "$vpn" "$vpn_source" "$doh" "${mode:---metadata}"
+    watchdog_classify "$local_state" "$wan" "$vpn" "$doh"
+}
+
 # Stage 2A: pure fault classifier. Inputs are evidence states, NOT implicit
 # network probes. WAN_UP must mean an independently verified WAN path, not
 # merely 'netifd up'. VPN/DoH health must originate from independent checks.
@@ -1379,6 +1511,7 @@ Commands:
   watchdog-monitor [cycles] [interval]  Bounded RAM-only observer (default 6 x 20s)
   watchdog-observe  Continuous observe-only monitor (opt-in procd instance)
   watchdog-classify <local> <wan> <vpn> <doh>  Pure read-only classification of supplied evidence (no probes)
+  watchdog-evidence [--live]  Manual evidence sample (external probes require --live)
   daemon          Run the periodic validated refresh worker
   version         Print version
 
@@ -1400,6 +1533,7 @@ case "${1:-}" in
     watchdog-monitor) shift; watchdog_monitor "$@" ;;
     watchdog-observe) watchdog_observe ;;
     watchdog-classify) shift; watchdog_classify "$@" ;;
+    watchdog-evidence) shift; watchdog_evidence "$@" ;;
     daemon) daemon_loop ;;
     version|--version|-V) echo "$VERSION" ;;
     help|--help|-h|'') usage ;;
