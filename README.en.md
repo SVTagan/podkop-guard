@@ -10,6 +10,10 @@ The project originated from a real failure: Podkop could not download part of it
 
 This is an independent project and is not part of or affiliated with Podkop.
 
+### Experimental failure classifier (stage 2A)
+
+The development branch includes `podkop-guard watchdog-classify <local> <wan> <vpn> <doh>`. This is a **pure classification of supplied evidence**, not a live WAN/VPN/DoH probe, background task or recovery engine. Example: `podkop-guard watchdog-classify HEALTHY_SAMPLED UP FAILED HEALTHY` returns `class=VPN_UNAVAILABLE ... authority=observe-only action=none`. WAN UP/DOWN evidence requires independently verified WAN connectivity (not merely netifd link state); VPN and DoH require separate probes. Unknown/contradictory signals are conservatively classified and **never authorize recovery**. This is not wired into the running `watchdog-observe` or procd instance; only synthetic CI cases have been added so far.
+
 ## Status
 
 Current stable version: **0.2.4**.
