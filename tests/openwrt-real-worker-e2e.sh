@@ -132,6 +132,12 @@ fi
 grep -q '^EVIDENCE local=' /tmp/pg-real-evidence
 grep -Fq 'doh=UNKNOWN doh_source=not_probed mode=metadata' /tmp/pg-real-evidence
 grep -Fq 'authority=observe-only action=none' /tmp/pg-real-evidence
+grep -q '^CLASSIFY local_class=' /tmp/pg-real-evidence
+# Local process suspicion must survive UNKNOWN WAN/VPN/DoH on real BusyBox.
+sh /usr/bin/podkop-guard watchdog-classify SUSPECT_DNS_TIMEOUT UNKNOWN UNKNOWN UNKNOWN > /tmp/pg-local-classify
+grep -Fq 'local_class=BOX_DNS_HUNG_CANDIDATE local_evidence=SUSPECT external_class=EXTERNAL_UNKNOWN' /tmp/pg-local-classify
+grep -Fq 'authority=observe-only action=none' /tmp/pg-local-classify
+echo PASS_VM_TWO_AXIS_LOCAL_INDEPENDENCE
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
 echo PASS_VM_REAL_EVIDENCE_METADATA_ONLY
 

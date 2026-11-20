@@ -110,7 +110,7 @@ check() {
     printf '%s\n' "$out" | grep -Fq "$snippet" || {
         printf 'FAIL %s missing=%s output=%s\n' "$name" "$snippet" "$out" >&2; exit 1;
     }
-    printf '%s\n' "$out" | grep -Fq "CLASSIFY class=$class " || {
+    printf '%s\n' "$out" | grep -Fq "CLASSIFY local_class=$class " || {
         printf 'FAIL %s classification=%s output=%s\n' "$name" "$class" "$out" >&2; exit 1;
     }
     printf '%s\n' "$out" | grep -Fq 'authority=observe-only action=none' || exit 1
@@ -119,42 +119,42 @@ check() {
     printf 'PASS %s\n' "$name"
 }
 
-check healthy_links 'wan=UNKNOWN wan_source=netifd_unverified wan_link=UP vpn=UNKNOWN vpn_source=netifd_unverified vpn_link=UP' LOCAL_HEALTHY_WAN_UNVERIFIED
+check healthy_links 'wan=UNKNOWN wan_source=netifd_unverified wan_link=UP vpn=UNKNOWN vpn_source=netifd_unverified vpn_link=UP' LOCAL_HEALTHY_SAMPLED
 
 TEST_WAN_UP=false
 printf '0\n' > "$tmp/net/wan/carrier"
-check link_down 'wan=DOWN wan_source=netifd_link_down wan_link=DOWN vpn=UNKNOWN' WAN_OUTAGE
+check link_down 'wan=DOWN wan_source=netifd_link_down wan_link=DOWN vpn=UNKNOWN' LOCAL_HEALTHY_SAMPLED
 TEST_WAN_PENDING=true
-check link_pending 'wan=UNKNOWN wan_source=netifd_unverified wan_link=DOWN' LOCAL_HEALTHY_WAN_UNVERIFIED
+check link_pending 'wan=UNKNOWN wan_source=netifd_unverified wan_link=DOWN' LOCAL_HEALTHY_SAMPLED
 TEST_WAN_PENDING=false
 TEST_WAN_UP=true
 printf '1\n' > "$tmp/net/wan/carrier"
 
 TEST_WAN_UBUS=fail
-check wan_ubus_unavailable 'wan=UNKNOWN wan_source=netifd_unavailable wan_link=UNKNOWN' LOCAL_HEALTHY_WAN_UNVERIFIED
+check wan_ubus_unavailable 'wan=UNKNOWN wan_source=netifd_unavailable wan_link=UNKNOWN' LOCAL_HEALTHY_SAMPLED
 TEST_WAN_UBUS=ready
 
 TEST_VPN_UP=false
-check vpn_link_down 'vpn=UNKNOWN vpn_source=netifd_unverified vpn_link=DOWN' LOCAL_HEALTHY_WAN_UNVERIFIED
+check vpn_link_down 'vpn=UNKNOWN vpn_source=netifd_unverified vpn_link=DOWN' LOCAL_HEALTHY_SAMPLED
 TEST_VPN_UP=true
 TEST_VPN_UBUS=fail
-check vpn_ubus_unavailable 'vpn=UNKNOWN vpn_source=netifd_unavailable vpn_link=UNKNOWN' LOCAL_HEALTHY_WAN_UNVERIFIED
+check vpn_ubus_unavailable 'vpn=UNKNOWN vpn_source=netifd_unavailable vpn_link=UNKNOWN' LOCAL_HEALTHY_SAMPLED
 TEST_VPN_UBUS=ready
 
 TEST_CONN=proxy
-check proxy_mode 'vpn=UNKNOWN vpn_source=not_in_vpn_mode vpn_link=UNKNOWN' LOCAL_HEALTHY_WAN_UNVERIFIED
+check proxy_mode 'vpn=UNKNOWN vpn_source=not_in_vpn_mode vpn_link=UNKNOWN' LOCAL_HEALTHY_SAMPLED
 TEST_CONN=vpn
 TEST_IFACE='awg0_2;sh'
-check invalid_iface 'vpn=UNKNOWN vpn_source=invalid_interface vpn_link=UNKNOWN' LOCAL_HEALTHY_WAN_UNVERIFIED
+check invalid_iface 'vpn=UNKNOWN vpn_source=invalid_interface vpn_link=UNKNOWN' LOCAL_HEALTHY_SAMPLED
 TEST_IFACE=wg0
-check unsupported_iface 'vpn=UNKNOWN vpn_source=unsupported_interface vpn_link=UNKNOWN' LOCAL_HEALTHY_WAN_UNVERIFIED
+check unsupported_iface 'vpn=UNKNOWN vpn_source=unsupported_interface vpn_link=UNKNOWN' LOCAL_HEALTHY_SAMPLED
 TEST_IFACE=awg0_2
 
 TEST_LOCAL=SUSPECT_DNS_TIMEOUT
 TEST_LOCAL_RC=1
-check dns_timeout 'local=SUSPECT_DNS_TIMEOUT' LOCAL_FAULT_WAN_UNVERIFIED
+check dns_timeout 'local=SUSPECT_DNS_TIMEOUT' BOX_DNS_HUNG_CANDIDATE
 TEST_LOCAL=SUSPECT_PROCESS_MISSING
-check missing_process 'local=SUSPECT_PROCESS_MISSING' LOCAL_FAULT_WAN_UNVERIFIED
+check missing_process 'local=SUSPECT_PROCESS_MISSING' BOX_PROCESS_MISSING_CANDIDATE
 TEST_LOCAL=INACTIVE
 TEST_LOCAL_RC=0
 check inactive 'local=INACTIVE' MANUAL_STOP
@@ -163,7 +163,7 @@ check in_reload 'local=TRANSITION' MAINTENANCE
 TEST_LOCAL=HEALTHY_SAMPLED
 
 TEST_LOCAL_RC=9
-check unexpected_local_rc 'local=UNKNOWN pid=none' INSUFFICIENT_EVIDENCE
+check unexpected_local_rc 'local=UNKNOWN pid=none' LOCAL_UNKNOWN
 TEST_LOCAL_RC=0
 TEST_LOCAL_CHANGED=TRANSITION
 check local_change 'local=TRANSITION pid=none wan=UNKNOWN wan_source=changed_during_sample' MAINTENANCE

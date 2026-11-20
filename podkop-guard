@@ -1405,8 +1405,12 @@ watchdog_evidence() {
 # merely 'netifd up'. VPN/DoH health must originate from independent checks.
 # No signals, service changes, filesystem writes, or calls to other programs.
 # This is intentionally NOT yet wired into watchdog-observe or auto-recovery.
+# Stage A: independent local diagnosis and external connectivity context.
+# Four inputs are externally supplied evidence, NOT implicit live probes.
+# A one-shot sample NEVER confirms a failure or authorizes recovery.
 watchdog_classify() {
-    local local_state wan vpn doh result
+    local local_state wan vpn doh local_class local_evidence
+    local external_class external_coverage
 
     if [ "$#" -ne 4 ]; then
         err "usage: podkop-guard watchdog-classify <local_state> <wan:UP|DOWN|UNKNOWN> <vpn:HEALTHY|FAILED|UNKNOWN> <doh:HEALTHY|FAILED|UNKNOWN>"
@@ -1425,68 +1429,46 @@ watchdog_classify() {
     case "$vpn" in HEALTHY|FAILED|UNKNOWN) ;; *) err "invalid VPN evidence"; return 2 ;; esac
     case "$doh" in HEALTHY|FAILED|UNKNOWN) ;; *) err "invalid DoH evidence"; return 2 ;; esac
 
-    # Never override manual shutdown or admin reload with external signals.
+    # This axis is deliberately INDEPENDENT of WAN/VPN/DoH. SUSPECT is
+    # not CONFIRMED: only future local debounce/maintenance gates may confirm.
     case "$local_state" in
-        INACTIVE) result=MANUAL_STOP ;;
-        TRANSITION) result=MAINTENANCE ;;
-        *)
-            # External failures and contradictory probes are never a licence
-            # to restart Podkop/sing-box. WAN_DOWN needs real path evidence.
-            case "$wan" in
-                DOWN)
-                    if [ "$vpn" = HEALTHY ]; then
-                        result=CONFLICTING_EVIDENCE
-                    elif [ "$local_state" = HEALTHY_SAMPLED ]; then
-                        result=WAN_OUTAGE
-                    else
-                        result=WAN_OUTAGE_LOCAL_UNCERTAIN
-                    fi
-                    ;;
-                UNKNOWN)
-                    case "$local_state:$vpn" in
-                        HEALTHY_SAMPLED:FAILED) result=VPN_FAILURE_WAN_UNVERIFIED ;;
-                        HEALTHY_SAMPLED:*) result=LOCAL_HEALTHY_WAN_UNVERIFIED ;;
-                        SUSPECT_DNS_TIMEOUT:*|SUSPECT_PROCESS_MISSING:*) result=LOCAL_FAULT_WAN_UNVERIFIED ;;
-                        *) result=INSUFFICIENT_EVIDENCE ;;
-                    esac
-                    ;;
-                UP)
-                    case "$local_state" in
-                        SUSPECT_PROCESS_MISSING)
-                            if [ "$vpn" = HEALTHY ]; then
-                                result=CONFLICTING_EVIDENCE
-                            else
-                                result=BOX_PROCESS_MISSING_CANDIDATE
-                            fi
-                            ;;
-                        SUSPECT_DNS_TIMEOUT)
-                            if [ "$doh" = FAILED ]; then
-                                result=MIXED_DNS_FAILURES
-                            else
-                                result=BOX_DNS_HUNG_CANDIDATE
-                            fi
-                            ;;
-                        HEALTHY_SAMPLED)
-                            if [ "$vpn" = FAILED ] && [ "$doh" = FAILED ]; then
-                                result=MIXED_EXTERNAL_FAILURES
-                            elif [ "$vpn" = FAILED ]; then
-                                result=VPN_UNAVAILABLE
-                            elif [ "$doh" = FAILED ]; then
-                                result=DOH_UPSTREAM_UNAVAILABLE
-                            elif [ "$vpn" = HEALTHY ] && [ "$doh" = HEALTHY ]; then
-                                result=HEALTHY
-                            else
-                                result=LOCAL_HEALTHY_EXTERNAL_UNVERIFIED
-                            fi
-                            ;;
-                        *) result=INSUFFICIENT_EVIDENCE ;;
-                    esac
-                    ;;
-            esac
-            ;;
+        HEALTHY_SAMPLED)         local_class=LOCAL_HEALTHY_SAMPLED;          local_evidence=SAMPLED ;;
+        SUSPECT_DNS_TIMEOUT)     local_class=BOX_DNS_HUNG_CANDIDATE;       local_evidence=SUSPECT ;;
+        SUSPECT_PROCESS_MISSING) local_class=BOX_PROCESS_MISSING_CANDIDATE;local_evidence=SUSPECT ;;
+        INACTIVE)                local_class=MANUAL_STOP;                  local_evidence=INTENTIONAL ;;
+        TRANSITION)              local_class=MAINTENANCE;                 local_evidence=TRANSITION ;;
+        UNKNOWN)                 local_class=LOCAL_UNKNOWN;               local_evidence=UNKNOWN ;;
     esac
-    printf 'CLASSIFY class=%s local=%s wan=%s vpn=%s doh=%s authority=observe-only action=none\n' \
-        "$result" "$local_state" "$wan" "$vpn" "$doh"
+
+    # Count the explicitly supplied observations, not their trustworthiness.
+    # Actual provenance/validation is the caller's responsibility.
+    external_coverage=0
+    [ "$wan" = UNKNOWN ] || external_coverage=$((external_coverage + 1))
+    [ "$vpn" = UNKNOWN ] || external_coverage=$((external_coverage + 1))
+    [ "$doh" = UNKNOWN ] || external_coverage=$((external_coverage + 1))
+
+    # Preserve external evidence separately; never rewrite local diagnosis.
+    # DOWN is a supplied WAN state, NOT proof of ISP responsibility.
+    if [ "$wan" = DOWN ] && { [ "$vpn" = HEALTHY ] || [ "$doh" = HEALTHY ]; }; then
+        external_class=CONFLICTING_EVIDENCE
+    elif [ "$wan" = DOWN ]; then
+        external_class=WAN_REPORTED_DOWN
+    elif [ "$vpn" = FAILED ] && [ "$doh" = FAILED ]; then
+        external_class=MIXED_EXTERNAL_FAILURES
+    elif [ "$vpn" = FAILED ]; then
+        external_class=VPN_UNAVAILABLE
+    elif [ "$doh" = FAILED ]; then
+        external_class=DOH_UPSTREAM_UNAVAILABLE
+    elif [ "$wan" = UP ] && [ "$vpn" = HEALTHY ] && [ "$doh" = HEALTHY ]; then
+        external_class=EXTERNAL_HEALTHY_SAMPLED
+    elif [ "$external_coverage" -gt 0 ]; then
+        external_class=EXTERNAL_PARTIAL
+    else
+        external_class=EXTERNAL_UNKNOWN
+    fi
+
+    printf 'CLASSIFY local_class=%s local_evidence=%s external_class=%s external_coverage=%s/3 wan=%s vpn=%s doh=%s authority=observe-only action=none\n' \
+        "$local_class" "$local_evidence" "$external_class" "$external_coverage" "$wan" "$vpn" "$doh"
     return 0
 }
 

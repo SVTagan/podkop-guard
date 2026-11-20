@@ -10,9 +10,14 @@ The project originated from a real failure: Podkop could not download part of it
 
 This is an independent project and is not part of or affiliated with Podkop.
 
-### Experimental failure classifier (stage 2A)
+### Independent two-axis classification (stage A, experimental)
 
-The development branch includes `podkop-guard watchdog-classify <local> <wan> <vpn> <doh>`. This is a **pure classification of supplied evidence**, not a live WAN/VPN/DoH probe, background task or recovery engine. Example: `podkop-guard watchdog-classify HEALTHY_SAMPLED UP FAILED HEALTHY` returns `class=VPN_UNAVAILABLE ... authority=observe-only action=none`. WAN UP/DOWN evidence requires independently verified WAN connectivity (not merely netifd link state); VPN and DoH require separate probes. Unknown/contradictory signals are conservatively classified and **never authorize recovery**. This is not wired into the running `watchdog-observe` or procd instance; only synthetic CI cases have been added so far.
+`podkop-guard watchdog-classify <local> <wan> <vpn> <doh>` is a **pure function**: it performs no network probes, recovery, or service actions. Its new result contains two separate axes: `local_class` / `local_evidence` for sing-box/Podkop health, and `external_class` / `external_coverage` for supplied WAN/VPN/DoH context. Coverage is only the number of non-`UNKNOWN` inputs out of three; **it is not a confidence or trust metric**.
+
+`SUSPECT_DNS_TIMEOUT` always yields `BOX_DNS_HUNG_CANDIDATE`; `SUSPECT_PROCESS_MISSING` always yields `BOX_PROCESS_MISSING_CANDIDATE` **even when WAN is UNKNOWN or DOWN**. One local sample is a suspicion, not a confirmed fault or permission to restart. `HEALTHY_SAMPLED` means sampled *local* health only. Manual stop and maintenance take their respective local categories. A dead VPN with healthy local sing-box gives `local_class=LOCAL_HEALTHY_SAMPLED` and `external_class=VPN_UNAVAILABLE`.
+
+`watchdog-evidence` remains independent metadata-only collection and now prints the new two-axis result. It never invokes Failover, NetGuard or curl. It does not assert WAN reachability, and VPN/DoH remain UNKNOWN without separately validated evidence. All results end in `authority=observe-only action=none`. The previous experimental `CLASSIFY class=...` format has been replaced; stable `v0.2.4` remains unchanged. Recovery/fail-open require a separate, future policy gate. This code has not been installed on Redmi AX6000.
+
 
 ### Independent local evidence collection (stage 6B1.2, experimental)
 
