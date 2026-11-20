@@ -25,6 +25,10 @@ if [ "$#" -eq 6 ] && [ "$1 $2 $3 $4 $5 $6" = '-t 5 call service list {"name":"si
     if [ "$PROCD_B2_MODE" = rebind ] && [ "$count" -ge 2 ]; then
         printf 'BUS2\n' > "$PROCD_B2_BUS_FILE"
     fi
+    if [ "$PROCD_B2_MODE" = bus_outage ]; then
+        if [ "$count" -eq 2 ]; then printf 'DOWN\n' > "$PROCD_B2_BUS_FILE"; fi
+        if [ "$count" -eq 3 ]; then printf 'BUS2\n' > "$PROCD_B2_BUS_FILE"; fi
+    fi
     pid=100
     if [ "$PROCD_B2_MODE" = pid_change ] && [ "$count" -ge 2 ]; then pid=200; fi
     printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":%s,"command":["/usr/bin/sing-box","run"]}}}}\n' "$pid"
@@ -77,8 +81,21 @@ case_run() {
 case_run normal quiet 'snapshot=RUNNING pid=100 history=INCOMPLETE action=none' 2
 case_run rebind rebind 'subscription=RESET reason=ubusd_changed' 4
 case_run event event 'event=RESPAWN_REPORTED diagnosis=UNCONFIRMED history=INCOMPLETE action=none' 3
+# A live Podkop list update/reload is not a license to call a procd event a
+# confirmed runtime defect, even when its type is instance.respawn.
+mkdir -p "$tmp/proc/321"
+printf '/bin/sh\000/usr/bin/podkop\000reload\000' > "$tmp/proc/321/cmdline"
+PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc"
+export PODKOP_GUARD_WATCH_PROC_ROOT
+case_run maintenance event 'event=RESPAWN_REPORTED diagnosis=MAINTENANCE history=INCOMPLETE action=none' 2
+rm -f "$tmp/proc/321/cmdline"
+unset PODKOP_GUARD_WATCH_PROC_ROOT
+
 case_run missing_event pid_change 'state_change=UNEXPLAINED snapshot=RUNNING history=INCOMPLETE' 3
 case_run dead_subscriber fail_subscription 'subscription=RESET reason=subscriber_exit' 3
+case_run bus_outage bus_outage 'subscription=LOST reason=ubusd_unavailable' 5
+[ "$(wc -l < "$PROCD_B2_SUB_LOG")" -eq 2 ] || { echo 'FAIL bus outage did not resubscribe' >&2; exit 1; }
+
 
 # When the ubus daemon disappears, the current snapshot remains diagnostic,
 # but neither the subscription nor history is treated as healthy.
