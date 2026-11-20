@@ -18,7 +18,7 @@ SH
 
 cat > "$tmp/bin/ubus" <<'SH'
 #!/bin/sh
-[ "$1 $2 $3 $4 $5 $6" = '-t 5 call network.interface.wan status' ] || exit 9
+[ "$#" -eq 5 ] && [ "$1 $2 $3 $4 $5" = '-t 5 call network.interface.wan status' ] || exit 9
 [ "$TEST_NETIFD" != fail ] || exit 1
 printf '{}\n'
 SH
