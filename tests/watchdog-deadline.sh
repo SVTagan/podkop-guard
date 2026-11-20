@@ -76,7 +76,7 @@ for signal in TERM KILL; do
     tries=0
     while [ ! -s "$tmp/childpid" ] && [ "$tries" -lt 50 ]; do
         tries=$((tries + 1))
-        sleep 0.1
+        sleep 0.1 2>/dev/null || sleep 1
     done
     [ -s "$tmp/childpid" ] || {
         echo "FAIL signal_${signal}: child did not start" >&2; exit 1;
@@ -95,7 +95,7 @@ for signal in TERM KILL; do
         fi
         [ "$alive" -eq 0 ] && break
         tries=$((tries + 1))
-        sleep 0.1
+        sleep 0.1 2>/dev/null || sleep 1
     done
     [ "$alive" -eq 0 ] || {
         echo "FAIL signal_${signal}: child survived deadline" >&2; exit 1;
