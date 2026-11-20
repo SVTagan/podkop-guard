@@ -1273,6 +1273,96 @@ watchdog_observe() {
     watchdog_monitor 0 "$interval"
 }
 
+# Stage 2A: pure fault classifier. Inputs are evidence states, NOT implicit
+# network probes. WAN_UP must mean an independently verified WAN path, not
+# merely 'netifd up'. VPN/DoH health must originate from independent checks.
+# No signals, service changes, filesystem writes, or calls to other programs.
+# This is intentionally NOT yet wired into watchdog-observe or auto-recovery.
+watchdog_classify() {
+    local local_state wan vpn doh result
+
+    if [ "$#" -ne 4 ]; then
+        err "usage: podkop-guard watchdog-classify <local_state> <wan:UP|DOWN|UNKNOWN> <vpn:HEALTHY|FAILED|UNKNOWN> <doh:HEALTHY|FAILED|UNKNOWN>"
+        return 2
+    fi
+    local_state=$1
+    wan=$2
+    vpn=$3
+    doh=$4
+
+    case "$local_state" in
+        HEALTHY_SAMPLED|SUSPECT_DNS_TIMEOUT|SUSPECT_PROCESS_MISSING|INACTIVE|TRANSITION|UNKNOWN) ;;
+        *) err "invalid local evidence"; return 2 ;;
+    esac
+    case "$wan" in UP|DOWN|UNKNOWN) ;; *) err "invalid WAN evidence"; return 2 ;; esac
+    case "$vpn" in HEALTHY|FAILED|UNKNOWN) ;; *) err "invalid VPN evidence"; return 2 ;; esac
+    case "$doh" in HEALTHY|FAILED|UNKNOWN) ;; *) err "invalid DoH evidence"; return 2 ;; esac
+
+    # Never override manual shutdown or admin reload with external signals.
+    case "$local_state" in
+        INACTIVE) result=MANUAL_STOP ;;
+        TRANSITION) result=MAINTENANCE ;;
+        *)
+            # External failures and contradictory probes are never a licence
+            # to restart Podkop/sing-box. WAN_DOWN needs real path evidence.
+            case "$wan" in
+                DOWN)
+                    if [ "$vpn" = HEALTHY ]; then
+                        result=CONFLICTING_EVIDENCE
+                    elif [ "$local_state" = HEALTHY_SAMPLED ]; then
+                        result=WAN_OUTAGE
+                    else
+                        result=WAN_OUTAGE_LOCAL_UNCERTAIN
+                    fi
+                    ;;
+                UNKNOWN)
+                    case "$local_state:$vpn" in
+                        HEALTHY_SAMPLED:FAILED) result=VPN_FAILURE_WAN_UNVERIFIED ;;
+                        HEALTHY_SAMPLED:*) result=LOCAL_HEALTHY_WAN_UNVERIFIED ;;
+                        SUSPECT_DNS_TIMEOUT:*|SUSPECT_PROCESS_MISSING:*) result=LOCAL_FAULT_WAN_UNVERIFIED ;;
+                        *) result=INSUFFICIENT_EVIDENCE ;;
+                    esac
+                    ;;
+                UP)
+                    case "$local_state" in
+                        SUSPECT_PROCESS_MISSING)
+                            if [ "$vpn" = HEALTHY ]; then
+                                result=CONFLICTING_EVIDENCE
+                            else
+                                result=BOX_PROCESS_MISSING_CANDIDATE
+                            fi
+                            ;;
+                        SUSPECT_DNS_TIMEOUT)
+                            if [ "$doh" = FAILED ]; then
+                                result=MIXED_DNS_FAILURES
+                            else
+                                result=BOX_DNS_HUNG_CANDIDATE
+                            fi
+                            ;;
+                        HEALTHY_SAMPLED)
+                            if [ "$vpn" = FAILED ] && [ "$doh" = FAILED ]; then
+                                result=MIXED_EXTERNAL_FAILURES
+                            elif [ "$vpn" = FAILED ]; then
+                                result=VPN_UNAVAILABLE
+                            elif [ "$doh" = FAILED ]; then
+                                result=DOH_UPSTREAM_UNAVAILABLE
+                            elif [ "$vpn" = HEALTHY ] && [ "$doh" = HEALTHY ]; then
+                                result=HEALTHY
+                            else
+                                result=LOCAL_HEALTHY_EXTERNAL_UNVERIFIED
+                            fi
+                            ;;
+                        *) result=INSUFFICIENT_EVIDENCE ;;
+                    esac
+                    ;;
+            esac
+            ;;
+    esac
+    printf 'CLASSIFY class=%s local=%s wan=%s vpn=%s doh=%s authority=observe-only action=none\n' \
+        "$result" "$local_state" "$wan" "$vpn" "$doh"
+    return 0
+}
+
 usage() {
     cat <<'EOF'
 Usage: podkop-guard <command>
@@ -1288,6 +1378,7 @@ Commands:
   watchdog-check  One-shot observe-only sing-box/Podkop runtime sample
   watchdog-monitor [cycles] [interval]  Bounded RAM-only observer (default 6 x 20s)
   watchdog-observe  Continuous observe-only monitor (opt-in procd instance)
+  watchdog-classify <local> <wan> <vpn> <doh>  Pure read-only classification of supplied evidence (no probes)
   daemon          Run the periodic validated refresh worker
   version         Print version
 
@@ -1308,6 +1399,7 @@ case "${1:-}" in
     watchdog-check) watchdog_check ;;
     watchdog-monitor) shift; watchdog_monitor "$@" ;;
     watchdog-observe) watchdog_observe ;;
+    watchdog-classify) shift; watchdog_classify "$@" ;;
     daemon) daemon_loop ;;
     version|--version|-V) echo "$VERSION" ;;
     help|--help|-h|'') usage ;;
