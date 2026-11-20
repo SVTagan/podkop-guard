@@ -1136,7 +1136,7 @@ watch_bounded_cleanup() {
     fi
     if [ -n "$WATCH_BOUND_DIR" ]; then
         rm -f "$WATCH_BOUND_DIR/pid" "$WATCH_BOUND_DIR/result" \
-            "$WATCH_BOUND_DIR/rc" "$WATCH_BOUND_DIR/expired"
+            "$WATCH_BOUND_DIR/rc" "$WATCH_BOUND_DIR/expired" "$WATCH_BOUND_DIR/armed"
         rmdir "$WATCH_BOUND_DIR" 2>/dev/null || :
         WATCH_BOUND_DIR=
     fi
@@ -1168,7 +1168,13 @@ watchdog_check_bounded() (
     # The true session leader writes its PID even if setsid forked itself.
     # The test script executes only the existing read-only watchdog-check.
     setsid sh -c '
-        printf "%s\n" "$$" > "$2/pid"
+        printf "%s\n" "$" > "$2/pid"
+        count=0
+        while [ ! -f "$2/armed" ] && [ "$count" -lt 30 ]; do
+            count=$((count + 1))
+            sleep 0.1
+        done
+        [ -f "$2/armed" ] || exit 2
         sh "$1" watchdog-check > "$2/result" 2>&1
         printf "%s\n" "$?" > "$2/rc"
     ' b4 "$script" "$WATCH_BOUND_DIR" >/dev/null 2>&1 &
@@ -1189,6 +1195,8 @@ watchdog_check_bounded() (
     if ! watch_bounded_group_owned "$WATCH_BOUND_PID"; then
         printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unverified\n'; exit 2
     fi
+    # Release the session leader only after verifying its own PID/PGID/SID.
+    : > "$WATCH_BOUND_DIR/armed"
     (
         sleep "$limit"
         if [ ! -f "$WATCH_BOUND_DIR/rc" ]; then
