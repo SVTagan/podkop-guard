@@ -19,6 +19,12 @@ This is an independent project and is not part of or affiliated with Podkop.
 `watchdog-evidence` remains independent metadata-only collection and now prints the new two-axis result. It never invokes Failover, NetGuard or curl. It does not assert WAN reachability, and VPN/DoH remain UNKNOWN without separately validated evidence. All results end in `authority=observe-only action=none`. The previous experimental `CLASSIFY class=...` format has been replaced; stable `v0.2.4` remains unchanged. Recovery/fail-open require a separate, future policy gate. This code has not been installed on Redmi AX6000.
 
 
+### Stage B2: bounded procd event subscription and reconciliation (experimental)
+
+`watchdog-procd-monitor [cycles] [interval]` is a **manual-only, bounded**, read-only event supervisor: it subscribes to `ubus -S subscribe service`, detects `ubusd` changes using PID + process start time, rebinds if the subscriber dies, and independently reads a fresh `watchdog-procd-snapshot` each cycle. A bounded RAM-backed FIFO is created in `/tmp` and removed at exit. Missed events cannot be recovered: **history=INCOMPLETE always**, including after a successful resubscription or healthy snapshot. A PID change without a captured event is logged as `state_change=UNEXPLAINED`, never as a confirmed crash.
+
+Observed respawn/fail events are diagnostics only; when local Podkop maintenance is detected they are marked `diagnosis=MAINTENANCE`. `watchdog-procd-follow` offers explicit continuous, change-only observation, but **is not enabled in procd init**, is not a recovery component and is not installed on the AX6000. The bounded monitor supports 1–30 cycles with 1–30 second interval. No UCI writes, service signals, restart, VPN switching or fail-open are performed. The subscriber is expected to be terminated on exit. This is still experimental until independent QEMU and hardware acceptance.
+
 ### Stage B1: procd event diagnostics without process control
 
 Experimental `watchdog-procd-event` reads **one JSON event line** from `ubus -S subscribe service` on stdin. It recognizes only `sing-box` / `sing-box.main`, mapping `instance.respawn` to `RESPAWN_REPORTED` and `instance.fail` to `CRASH_LOOP_REPORTED`. Routine start/stop and unrelated services are not treated as crashes. Malformed events are `UNKNOWN`, with no raw event echoed to logs; every result is `action=none`.

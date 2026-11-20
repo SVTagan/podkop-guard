@@ -152,6 +152,15 @@ printf '%s\n' '{"instance.fail":{"service":"sing-box","instance":"sing-box.main"
     /usr/bin/podkop-guard watchdog-procd-event > /tmp/pg-real-procd-event
 grep -Fq 'state=CRASH_LOOP_REPORTED source=procd pid=1253 exit_code=137 respawn_count=6 action=none' /tmp/pg-real-procd-event
 echo PASS_VM_PROCD_EVENT_DECODER
+# B2 actual BusyBox ash read -t + ubus subscriber + periodic procd status.
+# The guest has no deployed Podkop runtime. No exit or restart is induced.
+PODKOP_GUARD_PROCD_TMP_DIR=/tmp \
+    /usr/bin/podkop-guard watchdog-procd-monitor 2 1 > /tmp/pg-procd-monitor
+grep -q '^PROCD_MONITOR_END completed=2 attempts=' /tmp/pg-procd-monitor
+grep -Fq 'history=INCOMPLETE action=none' /tmp/pg-procd-monitor
+[ -z "$(find /tmp -maxdepth 1 -name 'podkop-guard-procd.*' -print -quit)" ]
+echo PASS_VM_PROCD_SUBSCRIBE_BOUNDED
+
 
 
 # Bounded observation has no recovery, regardless of missing VPN.
