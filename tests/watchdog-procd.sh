@@ -47,7 +47,7 @@ event_case spoofed_code 'PROCD_EVENT state=UNKNOWN reason=invalid_exit_fields ac
 event_case negative_count 'PROCD_EVENT state=UNKNOWN reason=invalid_exit_fields action=none' '{"instance.fail":{"service":"sing-box","instance":"sing-box.main","pid":2,"exit_code":1,"respawn_count":-1,"command":["/usr/bin/sing-box"]}}'
 event_case bad_pid 'PROCD_EVENT state=UNKNOWN reason=invalid_exit_fields action=none' '{"instance.fail":{"service":"sing-box","instance":"sing-box.main","pid":0,"exit_code":1,"respawn_count":2,"command":["/usr/bin/sing-box"]}}'
 event_case foreign_service 'PROCD_EVENT state=IGNORED reason=other_instance action=none' '{"instance.start":{"service":"dnsmasq","instance":"instance1"}}'
-event_case empty_data 'PROCD_EVENT state=UNKNOWN reason=invalid_json action=none' ''
+event_case empty_data 'PROCD_EVENT state=UNKNOWN reason=empty_input action=none' ''
 # Oversized event must not be logged verbatim or parsed.
 big=$(awk 'BEGIN {printf "%9000s", "x"}')
 event_case too_long 'PROCD_EVENT state=UNKNOWN reason=oversize action=none' "$big"
@@ -74,6 +74,7 @@ snapshot_case false_running 'PROCD_SNAPSHOT state=UNKNOWN reason=incomplete_inst
 snapshot_case wrong_process 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":1,"command":["/tmp/sing-box-validator"]}}}}' ok
 snapshot_case bus_error 'PROCD_SNAPSHOT state=UNKNOWN reason=ubus_unavailable action=none' '{}' fail
 snapshot_case invalid_reply 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_json action=none' '{' ok
+snapshot_case empty_reply 'PROCD_SNAPSHOT state=UNKNOWN reason=empty_reply action=none' '' ok
 
 # Disallow arguments that could accidentally request service actions.
 for cmd in watchdog-procd-event watchdog-procd-snapshot; do

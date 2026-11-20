@@ -1416,6 +1416,10 @@ watchdog_procd_event() {
         printf 'PROCD_EVENT state=UNKNOWN reason=empty_input action=none\n'
         return 0
     }
+    if [ -z "$event" ]; then
+        printf 'PROCD_EVENT state=UNKNOWN reason=empty_input action=none\n'
+        return 0
+    fi
     if [ "${#event}" -gt 8192 ]; then
         printf 'PROCD_EVENT state=UNKNOWN reason=oversize action=none\n'
         return 0
@@ -1474,6 +1478,10 @@ watchdog_procd_snapshot() {
         printf 'PROCD_SNAPSHOT state=UNKNOWN reason=ubus_unavailable action=none\n'
         return 0
     }
+    if [ -z "$raw" ]; then
+        printf 'PROCD_SNAPSHOT state=UNKNOWN reason=empty_reply action=none\n'
+        return 0
+    fi
     parsed=$(printf '%s\n' "$raw" | jq -r '
         if type != "object" then
             "PROCD_SNAPSHOT state=UNKNOWN reason=invalid_reply action=none"

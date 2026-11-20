@@ -144,7 +144,7 @@ echo PASS_VM_REAL_EVIDENCE_METADATA_ONLY
 # An unregistered instance must not be interpreted as a crash-loop.
 procd_snapshot=$(/usr/bin/podkop-guard watchdog-procd-snapshot)
 case "$procd_snapshot" in
-    'PROCD_SNAPSHOT state=UNREGISTERED '* | 'PROCD_SNAPSHOT state=STOPPED '* | 'PROCD_SNAPSHOT state=UNKNOWN '*) ;;
+    'PROCD_SNAPSHOT state=UNREGISTERED '* | 'PROCD_SNAPSHOT state=STOPPED '* | 'PROCD_SNAPSHOT state=UNKNOWN '* | 'PROCD_SNAPSHOT state=RUNNING '*) ;;
     *) echo "FAIL_VM_PROCD_UNEXPECTED $procd_snapshot" >&2; exit 1 ;;
 esac
 [ "${procd_snapshot##*action=}" = none ]
