@@ -39,7 +39,20 @@ cat > "$tmp/bin/uci" <<'SH'
 [ "$1" = -q ] && [ "$2" = get ] || { echo "MUTATION_IGNORED" >&2; exit 9; }
 case "$3" in
     podkop.main.connection_type) echo vpn ;;
-    podkop.main.interface) echo "$TEST_IFACE" ;;
+    podkop.main.interface)
+        if [ -n "${TEST_IFACE_CHANGED:-}" ]; then
+            count=$(cat "$TEST_IFACE_COUNTER" 2>/dev/null || echo 0)
+            count=$((count + 1))
+            printf '%s\n' "$count" > "$TEST_IFACE_COUNTER"
+            if [ "$count" -ge 2 ]; then
+                echo "$TEST_IFACE_CHANGED"
+            else
+                echo "$TEST_IFACE"
+            fi
+        else
+            echo "$TEST_IFACE"
+        fi
+        ;;
     *) exit 1 ;;
 esac
 SH
@@ -91,6 +104,8 @@ TEST_WAN_SAMPLE=healthy
 TEST_VPN_SAMPLE=healthy
 export TEST_LOCAL TEST_LOCAL_RC TEST_PID TEST_NETIFD TEST_WAN_UP TEST_WAN_PENDING
 export TEST_IFACE TEST_WAN_SAMPLE TEST_VPN_SAMPLE
+export TEST_IFACE_COUNTER="$tmp/iface-count"
+export TEST_IFACE_CHANGED=
 
 run_case() {
     name=$1 mode=$2 evidence=$3 classified=$4 expected_probes=$5
@@ -159,6 +174,15 @@ run_case unsafe_interface --live 'vpn=UNKNOWN vpn_source=invalid_interface' LOCA
 TEST_IFACE=awg0_2
 TEST_VPN_SAMPLE=broken
 run_case invalid_vpn_checker --live 'vpn=UNKNOWN vpn_source=failover_unconfirmed' LOCAL_HEALTHY_EXTERNAL_UNVERIFIED 'wan '
+
+# A slow active VPN probe must be invalidated when Failover changes UCI.
+TEST_VPN_SAMPLE=healthy
+TEST_IFACE_CHANGED=awg0_3
+export TEST_IFACE_CHANGED
+rm -f "$TEST_IFACE_COUNTER"
+run_case concurrent_failover --live 'local=TRANSITION pid=none wan=UNKNOWN wan_source=changed_during_sample vpn=UNKNOWN vpn_source=changed_during_sample' MAINTENANCE 'wan vpn '
+TEST_IFACE_CHANGED=
+export TEST_IFACE_CHANGED
 
 # Any argument not explicitly allowed must be refused before probes.
 : > "$TEST_NETWORK_LOG"
