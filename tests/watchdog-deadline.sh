@@ -40,7 +40,13 @@ verify healthy 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' 0
 verify suspect 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=123 dns=timeout nft=present' 1 suspect
 verify invalid_exit 'WATCHDOG state=UNKNOWN reason=probe_invalid_exit' 2 invalid
 verify empty_output 'WATCHDOG state=UNKNOWN reason=probe_empty_output' 2 empty
+deadline_start=$(date +%s)
 verify hard_deadline 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline' 2 hung
+deadline_elapsed=$(( $(date +%s) - deadline_start ))
+[ "$deadline_elapsed" -lt 15 ] || {
+    echo "FAIL hard deadline took ${deadline_elapsed}s (child may have exited naturally)" >&2
+    exit 1
+}
 read -r pid < "$tmp/childpid"
 case "$pid" in ''|*[!0-9]*) echo 'FAIL invalid child PID' >&2; exit 1 ;; esac
 if [ -r "/proc/$pid/stat" ]; then
@@ -77,6 +83,7 @@ for signal in TERM KILL; do
     }
     read -r child < "$tmp/childpid"
     case "$child" in ''|*[!0-9]*) echo "FAIL signal_${signal}: invalid PID" >&2; exit 1 ;; esac
+    signal_start=$(date +%s)
     kill "-$signal" "$controller" 2>/dev/null || :
     wait "$controller" 2>/dev/null || :
     tries=0
@@ -92,6 +99,10 @@ for signal in TERM KILL; do
     done
     [ "$alive" -eq 0 ] || {
         echo "FAIL signal_${signal}: child survived deadline" >&2; exit 1;
+    }
+    signal_elapsed=$(( $(date +%s) - signal_start ))
+    [ "$signal_elapsed" -lt 15 ] || {
+        echo "FAIL signal_${signal} cleanup took ${signal_elapsed}s" >&2; exit 1;
     }
     passed=$((passed + 1))
     echo "PASS signal_${signal}_no_running_orphan"

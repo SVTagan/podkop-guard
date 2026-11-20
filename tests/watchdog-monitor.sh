@@ -77,7 +77,21 @@ run_case() {
     fi
     case "$output" in
         *"$expected"*) ;;
-        *) printf 'FAIL %s: expected %s, got:\n%s\n' "$name" "$expected" "$output" >&2; exit 1 ;;
+        *) printf 'FAIL %s: expected %s, got:\n%s\n' "$name" "$expected" "$output" >&2
+           # On a real BusyBox guest reveal the standalone bounded result
+           # with identical mock environment, without changing the worker.
+           printf '0\n' > "$tmp/counter"
+           set +e
+           diag=$(env MONITOR_TEST_FIXTURE="$tmp/fixture" \
+               MONITOR_TEST_COUNTER="$tmp/counter" \
+               MONITOR_TEST_UPTIME_FILE="$tmp/uptime" \
+               MONITOR_TEST_CHILD_PID_FILE="$tmp/childpid" \
+               PODKOP_GUARD_WATCH_CHECK_SCRIPT="$tmp/mock-check" \
+               sh "$script" watchdog-check-bounded 8 2>&1)
+           diag_rc=$?
+           set -e
+           printf 'DIAG bounded rc=%s output=%s\n' "$diag_rc" "$diag" >&2
+           exit 1 ;;
     esac
     case "$output" in
         *"MONITOR_END completed=$# confirmations=$confirmations action=none"*) ;;
@@ -115,8 +129,13 @@ unset MONITOR_TEST_CONTROL_MODE
 run_case late_probe_rejected 'reason=probe_late' 0 \
     "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"
 # A hard deadline is UNKNOWN, and the suspect streak must restart from zero.
+deadline_start=$(date +%s)
 MONITOR_TEST_DEADLINE=3 run_case deadline_breaks_streak 'reason=probe_hard_deadline' 0 \
     "$H" "$T" "$T" "HANG|101|1" "$T" "$T"
+deadline_elapsed=$(( $(date +%s) - deadline_start ))
+[ "$deadline_elapsed" -lt 20 ] || {
+    echo "FAIL monitor bounded sequence took ${deadline_elapsed}s" >&2; exit 1;
+}
 read -r child < "$tmp/childpid"
 case "$child" in ''|*[!0-9]*) echo "FAIL invalid monitor child PID" >&2; exit 1 ;; esac
 if [ -r "/proc/$child/stat" ]; then

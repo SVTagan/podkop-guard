@@ -1105,19 +1105,34 @@ watch_monitor_now() {
 # A BusyBox setsid launcher may fork. The session leader therefore writes
 # its own PID to a private RAM file; the launcher PID is NOT trusted.
 watch_bounded_group_owned() {
-    local pid
+    local pid proc line rest
     pid=$1
-    [ -r "/proc/$pid/stat" ] || return 1
-    awk -v id="$pid" '{
+    # A session leader can exit while its descendants remain in the
+    # original PGID/SID. Checking only /proc/<leader>/stat would miss them.
+    if [ -r "/proc/$pid/stat" ] && awk -v id="$pid" '{
         sub(/^.*\) /, "")
         if ($3 == id && $4 == id) exit 0
         exit 1
-    }' "/proc/$pid/stat"
+    }' "/proc/$pid/stat"; then
+        return 0
+    fi
+    # BusyBox-safe, shell-builtin scan; no heavyweight ps/pgrep dependency.
+    for proc in /proc/[0-9]*/stat; do
+        [ -r "$proc" ] || continue
+        IFS= read -r line < "$proc" || continue
+        case "$line" in *') '*) rest=${line##*) } ;; *) continue ;; esac
+        set -- $rest
+        [ "$#" -ge 4 ] || continue
+        [ "$3" = "$pid" ] && [ "$4" = "$pid" ] && return 0
+    done
+    return 1
 }
 
 watch_bounded_stop_group() {
     watch_bounded_group_owned "$1" || return 1
-    kill -KILL -- "-$1" 2>/dev/null || :
+    # POSIX/BusyBox shell builtins accept -SIGNAL -PGID, but dash's kill
+    # rejects the "-- -PGID" form and silently defeated our old timeout.
+    kill -KILL "-$1" 2>/dev/null
 }
 
 watch_bounded_cleanup() {

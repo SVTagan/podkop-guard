@@ -23,7 +23,7 @@ This is an independent project and is not part of or affiliated with Podkop.
 
 `watchdog-check-bounded [seconds]` runs the existing `watchdog-check` using `setsid` in a separate session and verifies its own diagnostic PID/PGID/SID. A deadline of 3–120 seconds kills **only the isolated diagnostic process group** on expiry and returns `UNKNOWN reason=probe_hard_deadline`, never confirmed failure. Temporary files use RAM (`/tmp`). If process isolation cannot be verified, the check fails conservatively with `UNKNOWN` and no unsafe group signal.
 
-**Stage B4.2 (experimental branch):** `watchdog-monitor` and opt-in `watchdog-observe` now use the bounded probe instead of a direct blocking check. Deadline expiry yields only `UNKNOWN` and resets the suspect streak. The resident deadline is restricted to 3–20s relative to procd's 30s stop timeout. The timer is created before releasing the probe and cancelling it reaps its sleep child. TERM/KILL scenarios were added to CI and QEMU. Not installed on Redmi AX6000; recovery/fail-open remain absent.
+Not integrated into the resident observer or deployed on the Redmi AX6000. No action against actual sing-box, Podkop, VPN, LKG or routing. Pending CI/QEMU and fault-injection validation.
 
 ### Stage B3 — local DNS, loopback and conntrack (experimental)
 

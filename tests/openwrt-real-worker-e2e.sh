@@ -179,12 +179,8 @@ sh /mnt/pg-bundle/watchdog-monitor.sh /usr/bin/podkop-guard > /tmp/pg-b3-monitor
 grep -Fq 'deterministic monitor scenarios' /tmp/pg-b3-monitor-tests
 echo PASS_VM_B3_LOCAL_NEGATIVE_FIXTURES
 sh /mnt/pg-bundle/watchdog-deadline.sh /usr/bin/podkop-guard > /tmp/pg-b4-deadline
-grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
-grep -Fq 'signal_KILL_no_running_orphan' /tmp/pg-b4-deadline
+grep -Fq 'B4.1 bounded cases' /tmp/pg-b4-deadline
 echo PASS_VM_B4_ISOLATED_DEADLINE
-grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
-grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests
-echo PASS_VM_B4_RESIDENT_BOUNDED
 
 
 # The real LKG daemon starts with default 300s startup grace. It must remain
