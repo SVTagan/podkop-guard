@@ -894,19 +894,31 @@ watch_probe_dns() {
     local rc
     WATCH_ANSWER=$(nslookup -timeout=3 -retry=1 -type=A fakeip.podkop.fyi 127.0.0.42 2>&1)
     rc=$?
-    if [ "$rc" -eq 0 ] && watch_fakeip; then
-        WATCH_DNS="fakeip"
-    else
-        case "$WATCH_ANSWER" in
-            *'timed out'*|*'no servers could be reached'*) WATCH_DNS="timeout" ;;
-            *) WATCH_DNS="unconfirmed" ;;
-        esac
-    fi
+    # BusyBox nslookup exit codes vary; DNS error replies are not silence.
+    case "$WATCH_ANSWER" in
+        *NXDOMAIN*|*"can't find"*|*'Non-existent domain'*) WATCH_DNS=nxdomain ;;
+        *SERVFAIL*|*'server failure'*) WATCH_DNS=servfail ;;
+        *REFUSED*|*'Connection refused'*|*'connection refused'*) WATCH_DNS=refused ;;
+        *'timed out'*|*'no servers could be reached'*) WATCH_DNS=timeout ;;
+        *)
+            if [ "$rc" -eq 0 ] && watch_fakeip; then WATCH_DNS=fakeip
+            else WATCH_DNS=unconfirmed
+            fi ;;
+    esac
 }
 
+# A loopback ICMP control can suppress a DNS-hang candidate ONLY after the
+# same procd PID previously answered ICMP successfully. ICMP is NOT DNS.
+watch_local_loopback() {
+    WATCH_LOOPBACK=unverified
+    command -v ping >/dev/null 2>&1 || return 1
+    if ping -c 1 -W 1 127.0.0.42 >/dev/null 2>&1; then
+        WATCH_LOOPBACK=ok
+        return 0
+    fi
+    return 1
+}
 
-# Identify actual Podkop jobs, never just a stale list_update.pid.
-# These checks suppress a suspected failure; they do not assert health.
 watch_maintenance_active() {
     local proc_root list_pid_file pid cmd proc
     proc_root="${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}"
@@ -940,14 +952,21 @@ watch_maintenance_active() {
 
 # A nearly-full conntrack table can delay local probes; suppress a definitive
 # hang diagnosis if direct evidence of pressure exists.
-watch_conntrack_pressure() {
-    local base count max
+watch_conntrack_status() {
+    local base count max threshold
+    WATCH_CONNTRACK=unverified
     base="${PODKOP_GUARD_WATCH_CONNTRACK_ROOT:-/proc/sys/net/netfilter}"
     [ -r "$base/nf_conntrack_count" ] && [ -r "$base/nf_conntrack_max" ] || return 1
     read -r count < "$base/nf_conntrack_count" || return 1
     read -r max < "$base/nf_conntrack_max" || return 1
     case "$count:$max" in *[!0-9:]*|:*|*:) return 1 ;; esac
-    [ "$max" -gt 0 ] && [ "$count" -ge $((max - max / 20)) ]
+    [ "${#count}" -le 12 ] && [ "${#max}" -le 12 ] || return 1
+    [ "$max" -gt 0 ] || return 1
+    threshold=$((max - max / 20))
+    if [ "$count" -ge "$threshold" ]; then WATCH_CONNTRACK=pressure
+    else WATCH_CONNTRACK=normal
+    fi
+    return 0
 }
 
 watchdog_check() {
@@ -956,6 +975,8 @@ watchdog_check() {
     WATCH_RUNNING="unknown"
     WATCH_NFT="unknown"
     WATCH_DNS="skipped"
+    WATCH_LOOPBACK=skipped
+    WATCH_CONNTRACK=unverified
     WATCH_MAINTENANCE=""
 
     for tool in ubus jsonfilter nft jq nslookup uci awk grep tr; do
@@ -981,6 +1002,16 @@ watchdog_check() {
     if [ "$rc" -ne 0 ]; then
         if watch_maintenance_active; then
             printf 'WATCHDOG state=TRANSITION reason=%s pid=none nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_NFT"
+            return 0
+        fi
+        # A new procd instance may appear between our two observations.
+        watch_box_pid
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            printf 'WATCHDOG state=UNKNOWN reason=procd_unavailable nft=%s\n' "$WATCH_NFT"
+            return 2
+        elif [ "$rc" -eq 0 ]; then
+            printf 'WATCHDOG state=TRANSITION reason=procd_returned pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
             return 0
         fi
         printf 'WATCHDOG state=SUSPECT_PROCESS_MISSING pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
@@ -1012,7 +1043,10 @@ watchdog_check() {
         return 0
     fi
     if [ "$WATCH_DNS" = "fakeip" ] && [ "$WATCH_NFT" = "present" ]; then
-        printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present\n' "$WATCH_PID"
+        if [ "${PODKOP_GUARD_WATCH_CONTROL_PROBE:-0}" = 1 ]; then
+            watch_local_loopback || :
+        fi
+        printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present loopback=%s\n' "$WATCH_PID" "$WATCH_LOOPBACK"
         return 0
     fi
     if [ "$WATCH_DNS" = "timeout" ]; then
@@ -1020,9 +1054,21 @@ watchdog_check() {
             printf 'WATCHDOG state=TRANSITION reason=%s pid=%s dns=timeout nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_PID" "$WATCH_NFT"
             return 0
         fi
-        if watch_conntrack_pressure; then
+        if ! watch_conntrack_status; then
+            printf 'WATCHDOG state=UNKNOWN reason=conntrack_unverified pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+            return 2
+        fi
+        if [ "$WATCH_CONNTRACK" = pressure ]; then
             printf 'WATCHDOG state=UNKNOWN reason=conntrack_pressure pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
             return 2
+        fi
+        # Only a successful loopback control for this same PID can be used
+        # as an independent reason to suppress the DNS timeout candidate.
+        if [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID:-}" = "$check_pid" ]; then
+            if ! watch_local_loopback; then
+                printf 'WATCHDOG state=UNKNOWN reason=loopback_unresponsive pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+                return 2
+            fi
         fi
         printf 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
         return 1
@@ -1053,6 +1099,7 @@ watchdog_monitor() {
     local sample_no state payload pid rest now armed_pid last_pid hold_until
     local missing_active streak streak_kind phase confirmations startup_deadline
     local stopped late_probe sample_elapsed max_sample display_cycles changes_only last_phase last_state
+    local control_pid control_attempts control_probe sample_reason
 
     [ "$#" -le 2 ] || {
         err "usage: podkop-guard watchdog-monitor [cycles 1..30] [interval_seconds 0..300]"
@@ -1094,6 +1141,8 @@ watchdog_monitor() {
     stopped=0
     last_phase=""
     last_state=""
+    control_pid=""
+    control_attempts=0
     display_cycles=$cycles
     [ "$cycles" -eq 0 ] && display_cycles=continuous
     trap 'stopped=1' TERM INT
@@ -1118,7 +1167,13 @@ watchdog_monitor() {
             continue
         fi
         now=$WATCH_MONITOR_NOW
-        sample_output=$(sh "$check_script" watchdog-check 2>&1)
+        control_probe=0
+        if [ -z "$control_pid" ] && [ "$control_attempts" -lt 5 ]; then
+            control_probe=1
+        fi
+        sample_output=$(PODKOP_GUARD_WATCH_CONTROL_PROBE="$control_probe" \
+            PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID="$control_pid" \
+            sh "$check_script" watchdog-check 2>&1)
         sample_rc=$?
         late_probe=0
         if watch_monitor_now; then
@@ -1152,6 +1207,17 @@ watchdog_monitor() {
                 if ! watch_monitor_number "$pid"; then state=UNKNOWN; fi
                 ;;
         esac
+        sample_reason=""
+        case "$sample_output" in
+            *' reason='*)
+                rest=${sample_output#* reason=}
+                sample_reason=${rest%% *}
+                case "$sample_reason" in
+                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|unsupported_dns_config|procd_returned|list_update|podkop_lifecycle) ;;
+                    *) sample_reason="" ;;
+                esac ;;
+        esac
+        if [ "$late_probe" -eq 1 ]; then sample_reason=probe_late; fi
         if [ "$late_probe" -eq 1 ]; then
             # A delayed probe can be CPU starvation, not a sing-box hang.
             state=UNKNOWN
@@ -1162,6 +1228,8 @@ watchdog_monitor() {
         if watch_monitor_number "$pid"; then
             if [ -n "$last_pid" ] && [ "$last_pid" != "$pid" ]; then
                 armed_pid=""
+                control_pid=""
+                control_attempts=0
                 hold_until=$((now + grace))
                 streak=0
                 streak_kind=""
@@ -1173,6 +1241,12 @@ watchdog_monitor() {
         case "$state" in
             HEALTHY_SAMPLED)
                 armed_pid=$pid
+                if [ "$control_probe" -eq 1 ]; then
+                    case "$sample_output" in
+                        *' loopback=ok'*) control_pid=$pid ;;
+                        *) control_attempts=$((control_attempts + 1)) ;;
+                    esac
+                fi
                 missing_active=0
                 streak=0
                 streak_kind=""
@@ -1180,6 +1254,8 @@ watchdog_monitor() {
                 ;;
             INACTIVE)
                 armed_pid=""
+                control_pid=""
+                control_attempts=0
                 last_pid=""
                 missing_active=0
                 streak=0
@@ -1188,6 +1264,8 @@ watchdog_monitor() {
                 ;;
             TRANSITION)
                 armed_pid=""
+                control_pid=""
+                control_attempts=0
                 missing_active=0
                 streak=0
                 streak_kind=""
@@ -1243,7 +1321,7 @@ watchdog_monitor() {
         if [ "$changes_only" = "0" ] || [ "$phase" != "$last_phase" ] || [ "$state" != "$last_state" ]; then
             printf 'MONITOR sample=%s/%s state=%s phase=%s pid=%s streak=%s%s\n' \
                 "$sample_no" "$display_cycles" "$state" "$phase" "$pid" "$streak" \
-                "$( [ "$late_probe" -eq 1 ] && printf ' reason=probe_late' )"
+                "$( [ -n "$sample_reason" ] && printf ' reason=%s' "$sample_reason" )"
         fi
         last_phase=$phase
         last_state=$state

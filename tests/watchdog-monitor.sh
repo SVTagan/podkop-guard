@@ -26,7 +26,20 @@ IFS=$oldifs
 if [ -n "$simulated_uptime" ]; then
     printf '%s\n' "$simulated_uptime" > "$MONITOR_TEST_UPTIME_FILE"
 fi
-printf 'WATCHDOG state=%s pid=%s mock=yes\n' "$state" "$pid"
+suffix=
+if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
+    if [ "$state" = HEALTHY_SAMPLED ] &&
+       [ "${PODKOP_GUARD_WATCH_CONTROL_PROBE:-0}" = 1 ]; then
+        suffix=' loopback=ok'
+    fi
+    if [ "$state" = SUSPECT_DNS_TIMEOUT ] &&
+       [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID:-}" = "$pid" ]; then
+        state=UNKNOWN
+        rc=2
+        suffix=' reason=loopback_unresponsive'
+    fi
+fi
+printf 'WATCHDOG state=%s pid=%s mock=yes%s\n' "$state" "$pid" "$suffix"
 exit "$rc"
 SH
 chmod +x "$tmp/mock-check"
@@ -87,6 +100,10 @@ run_case pid_rearmed     'state=SUSPECT_DNS_TIMEOUT phase=CONFIRMED' 1 "$H" "$T"
 run_case no_baseline     'phase=WAITING_FOR_BASELINE' 0 "$T" "$T" "$T"
 run_case bad_rc          'phase=UNKNOWN' 0 "$H" "SUSPECT_DNS_TIMEOUT|101|0"
 run_case wan_vpn_unknown 'phase=HEALTHY' 0 "$H" "$H" "$H"
+MONITOR_TEST_CONTROL_MODE=1
+export MONITOR_TEST_CONTROL_MODE
+run_case validated_loopback_suppression 'reason=loopback_unresponsive' 0 "$H" "$T" "$T" "$T"
+unset MONITOR_TEST_CONTROL_MODE
 run_case late_probe_rejected 'reason=probe_late' 0 \
     "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"
 

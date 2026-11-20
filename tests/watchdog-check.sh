@@ -10,6 +10,8 @@ mkdir -p "$tmp/bin"
 mkdir -p "$tmp/proc" "$tmp/netfilter"
 : > "$tmp/list.pid"
 printf '{}\n' > "$tmp/config.json"
+printf '10\n' > "$tmp/netfilter/nf_conntrack_count"
+printf '100\n' > "$tmp/netfilter/nf_conntrack_max"
 
 cat > "$tmp/bin/ubus" <<'SH'
 #!/bin/sh
@@ -56,8 +58,18 @@ case "$WATCH_TEST_DNS" in
     invalid) printf 'Name: fakeip.podkop.fyi\nAddress: 203.0.113.9\n' ;;
     banner) printf 'Server: 127.0.0.42\nAddress: 198.18.0.194\n'; exit 0 ;;
     nxdomain) printf "server can't find fakeip.podkop.fyi: NXDOMAIN\n" >&2; exit 1 ;;
+    servfail) printf 'server failure: SERVFAIL\n' >&2; exit 1 ;;
+    refused) printf 'response REFUSED\n' >&2; exit 1 ;;
+    unreachable) printf 'read: Connection refused\n' >&2; exit 1 ;;
+    contradicted) printf 'Name: fakeip.podkop.fyi\nAddress: 198.18.0.194\nSERVFAIL\n'; exit 0 ;;
     *) exit 9 ;;
 esac
+SH
+cat > "$tmp/bin/ping" <<'SH'
+#!/bin/sh
+[ "$#" -eq 5 ] && [ "$1 $2 $3 $4 $5" = '-c 1 -W 1 127.0.0.42' ] || exit 9
+[ "${WATCH_TEST_PING:-up}" = up ] && exit 0
+exit 1
 SH
 chmod +x "$tmp/bin"/*
 
@@ -95,6 +107,10 @@ case_run dns_timeout      SUSPECT_DNS_TIMEOUT     1 timeout   present 12345 true
 case_run dns_invalid      UNKNOWN                 2 invalid   present 12345 true  0 valid up
 case_run server_only      UNKNOWN                 2 banner    present 12345 true  0 valid up
 case_run dns_nxdomain     UNKNOWN                 2 nxdomain  present 12345 true  0 valid up
+case_run dns_servfail     UNKNOWN                 2 servfail  present 12345 true  0 valid up
+case_run dns_refused      UNKNOWN                 2 refused   present 12345 true  0 valid up
+case_run dns_port_refused UNKNOWN                 2 unreachable present 12345 true 0 valid up
+case_run contradicted     UNKNOWN                 2 contradicted present 12345 true 0 valid up
 case_run no_process       SUSPECT_PROCESS_MISSING 1 healthy   present none  false 0 valid up
 case_run manual_stop      INACTIVE                0 healthy   absent  none  false 1 valid up
 case_run nft_missing      UNKNOWN                 2 healthy   absent  12345 true  0 valid up
@@ -130,5 +146,26 @@ printf '100\n' > "$tmp/netfilter/nf_conntrack_max"
 case_run conntrack_pressure UNKNOWN 2 timeout present 12345 true 0 valid up
 printf '90\n' > "$tmp/netfilter/nf_conntrack_count"
 case_run conntrack_not_full SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
+
+rm -f "$tmp/netfilter/nf_conntrack_count"
+case_run conntrack_unavailable UNKNOWN 2 timeout present 12345 true 0 valid up
+printf 'bad\n' > "$tmp/netfilter/nf_conntrack_count"
+case_run conntrack_invalid UNKNOWN 2 timeout present 12345 true 0 valid up
+printf '10\n' > "$tmp/netfilter/nf_conntrack_count"
+
+PODKOP_GUARD_WATCH_CONTROL_PROBE=1
+WATCH_TEST_PING=up
+export PODKOP_GUARD_WATCH_CONTROL_PROBE WATCH_TEST_PING
+case_run control_healthy HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+WATCH_TEST_PING=down
+case_run control_filtered HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID=12345
+export PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID
+case_run control_suppresses_suspect UNKNOWN 2 timeout present 12345 true 0 valid up
+WATCH_TEST_PING=up
+case_run control_recovers SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID=67890
+case_run old_pid_no_control SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
+unset PODKOP_GUARD_WATCH_CONTROL_PROBE PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID WATCH_TEST_PING
 
 printf 'PASS: %s observer-only scenarios\n' "$tests"
