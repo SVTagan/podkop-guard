@@ -1283,7 +1283,7 @@ watchdog_evidence() {
     local wan wan_source wan_json wan_up wan_pending wan_device carrier carrier_file
     local wan_checker wan_output wan_rc wan_result wan_matches
     local vpn vpn_source iface vpn_checker vpn_output vpn_rc
-    local doh check_script conn_type
+    local doh check_script conn_type final_local final_rc final_iface final_conn
     mode="${1:-}"
     [ "$#" -le 1 ] || { err "usage: watchdog-evidence [--live]"; return 2; }
     case "$mode" in ""|--live) ;; *) err "usage: watchdog-evidence [--live]"; return 2 ;; esac
@@ -1372,7 +1372,7 @@ watchdog_evidence() {
     else
         conn_type=
     fi
-    if [ "$mode" = --live ] && [ "$conn_type" = vpn ]; then
+    if [ "$mode" = --live ] && [ "$conn_type" = vpn ] && [ "$wan" != DOWN ]; then
         # Only the active configured interface, not the entire VPN pool.
         # Never change VPN selection, quarantine or Failover state.
         case "$iface" in
@@ -1394,6 +1394,26 @@ watchdog_evidence() {
             else
                 vpn_source=failover_not_installed
             fi
+        fi
+    fi
+
+    # Do not combine a pre-reload local sample with a post-reload WAN/VPN
+    # probe. If the local state or active VPN changed while sampling, discard
+    # the external finding and return MAINTENANCE (always action=none).
+    if [ "$mode" = --live ]; then
+        final_local=$(sh "$check_script" watchdog-check 2>/dev/null)
+        final_rc=$?
+        final_conn=$(uci -q get podkop.main.connection_type 2>/dev/null)
+        final_iface=$(uci -q get podkop.main.interface 2>/dev/null)
+        if [ "$final_local:$final_rc" != "$local_output:$local_rc" ] ||
+           [ "$final_conn" != "$conn_type" ] ||
+           [ "$final_iface" != "$iface" ]; then
+            local_state=TRANSITION
+            local_pid=none
+            vpn=UNKNOWN
+            vpn_source=changed_during_sample
+            wan=UNKNOWN
+            wan_source=changed_during_sample
         fi
     fi
 
