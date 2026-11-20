@@ -1274,7 +1274,7 @@ watchdog_monitor() {
         return 2
     }
     [ "$changes_only" = "0" ] || [ "$changes_only" = "1" ] || { err "changes_only must be 0 or 1"; return 2; }
-    [ -r "$check_script" ] || { err "monitor check script is not readable"; return 2; }
+    [ -r "$0" ] || { err "monitor wrapper script is not readable"; return 2; }
     watch_monitor_now || { err "cannot read monotonic /proc/uptime"; return 2; }
 
     startup_deadline=$((WATCH_MONITOR_NOW + grace))
