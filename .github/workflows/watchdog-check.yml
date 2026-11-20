@@ -24,6 +24,7 @@ jobs:
           sh -n tests/watchdog-evidence.sh
           sh -n tests/watchdog-procd.sh
           sh -n tests/watchdog-procd-monitor.sh
+          sh -n tests/watchdog-deadline.sh
           sh -n tests/watchdog-init.sh
           sh -n tests/install-transaction.sh
           sh -n tests/srs-compat.sh
@@ -40,6 +41,7 @@ jobs:
           sh tests/watchdog-evidence.sh ./podkop-guard
           sh tests/watchdog-procd.sh ./podkop-guard
           sh tests/watchdog-procd-monitor.sh ./podkop-guard
+          sh tests/watchdog-deadline.sh ./podkop-guard
           sh tests/watchdog-init.sh ./podkop-guard.init
           sh tests/install-transaction.sh ./install.sh
           sh tests/srs-compat.sh ./podkop-guard

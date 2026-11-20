@@ -1101,6 +1101,115 @@ watch_monitor_now() {
     WATCH_MONITOR_NOW=$whole
 }
 
+# B4.1: explicit (manual) bounded local probe. Not yet in resident observer.
+# Only our own verified isolated diagnostic process group can be killed.
+watch_bounded_group_owned() {
+    local pid
+    pid=$1
+    [ -r "/proc/$pid/stat" ] || return 1
+    awk -v id="$pid" '{
+        sub(/^.*\) /, "")
+        if ($3 == id && $4 == id) exit 0
+        exit 1
+    }' "/proc/$pid/stat"
+}
+
+watch_bounded_stop_group() {
+    watch_bounded_group_owned "$1" || return 1
+    kill -KILL -- "-$1" 2>/dev/null || :
+}
+
+watch_bounded_cleanup() {
+    if [ -n "$WATCH_BOUND_TIMER" ]; then
+        kill -TERM "$WATCH_BOUND_TIMER" 2>/dev/null || :
+        wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
+        WATCH_BOUND_TIMER=
+    fi
+    if [ -n "$WATCH_BOUND_PID" ]; then
+        watch_bounded_stop_group "$WATCH_BOUND_PID" || :
+        wait "$WATCH_BOUND_PID" 2>/dev/null || :
+        WATCH_BOUND_PID=
+    fi
+    if [ -n "$WATCH_BOUND_DIR" ]; then
+        rm -f "$WATCH_BOUND_DIR/result" "$WATCH_BOUND_DIR/expired"
+        rmdir "$WATCH_BOUND_DIR" 2>/dev/null || :
+        WATCH_BOUND_DIR=
+    fi
+}
+
+watchdog_check_bounded() (
+    local limit script rc tries
+    [ "$#" -le 1 ] || { err "usage: watchdog-check-bounded [seconds 3..120]"; exit 2; }
+    limit="$1"
+    [ -n "$limit" ] || limit="$PODKOP_GUARD_WATCH_MAX_SAMPLE"
+    [ -n "$limit" ] || limit=8
+    watch_monitor_number "$limit" && [ "$limit" -ge 3 ] && [ "$limit" -le 120 ] || {
+        err "bounded check limit must be 3..120 seconds"; exit 2
+    }
+    script="$PODKOP_GUARD_WATCH_CHECK_SCRIPT"
+    [ -n "$script" ] || script="$0"
+    [ -r "$script" ] && command -v setsid >/dev/null 2>&1 &&
+        command -v mktemp >/dev/null 2>&1 || {
+        printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unavailable\n'
+        exit 2
+    }
+    WATCH_BOUND_DIR=$(mktemp -d "/tmp/podkop-guard-probe.XXXXXX") || {
+        printf 'WATCHDOG state=UNKNOWN reason=probe_tmp_unavailable\n'
+        exit 2
+    }
+    WATCH_BOUND_PID=
+    WATCH_BOUND_TIMER=
+    trap 'watch_bounded_cleanup' EXIT
+    trap 'exit 2' TERM INT
+    setsid sh "$script" watchdog-check > "$WATCH_BOUND_DIR/result" 2>&1 &
+    WATCH_BOUND_PID=$!
+    tries=0
+    while ! watch_bounded_group_owned "$WATCH_BOUND_PID" && [ "$tries" -lt 10 ]; do
+        tries=$((tries + 1))
+        sleep 0.1
+    done
+    if ! watch_bounded_group_owned "$WATCH_BOUND_PID"; then
+        # Unsafe to signal a guessed group. Signal only our own direct child.
+        kill -KILL "$WATCH_BOUND_PID" 2>/dev/null || :
+        printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unverified\n'
+        exit 2
+    fi
+    (
+        sleep "$limit"
+        if watch_bounded_group_owned "$WATCH_BOUND_PID"; then
+            : > "$WATCH_BOUND_DIR/expired"
+            watch_bounded_stop_group "$WATCH_BOUND_PID" || :
+        fi
+    ) &
+    WATCH_BOUND_TIMER=$!
+    wait "$WATCH_BOUND_PID"
+    rc=$?
+    WATCH_BOUND_PID=
+    if [ -f "$WATCH_BOUND_DIR/expired" ]; then
+        wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
+        WATCH_BOUND_TIMER=
+        printf 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline\n'
+        exit 2
+    fi
+    kill -TERM "$WATCH_BOUND_TIMER" 2>/dev/null || :
+    wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
+    WATCH_BOUND_TIMER=
+    case "$rc" in 0|1|2) ;; *)
+        printf 'WATCHDOG state=UNKNOWN reason=probe_invalid_exit\n'
+        exit 2 ;;
+    esac
+    [ -s "$WATCH_BOUND_DIR/result" ] || {
+        printf 'WATCHDOG state=UNKNOWN reason=probe_empty_output\n'
+        exit 2
+    }
+    [ "$(wc -c < "$WATCH_BOUND_DIR/result")" -le 2048 ] || {
+        printf 'WATCHDOG state=UNKNOWN reason=probe_oversize_output\n'
+        exit 2
+    }
+    cat "$WATCH_BOUND_DIR/result"
+    exit "$rc"
+)
+
 watchdog_monitor() {
     local cycles interval threshold grace check_script sample_output sample_rc
     local sample_no state payload pid rest now armed_pid last_pid hold_until
@@ -1850,6 +1959,7 @@ Commands:
   cache-restore   Manually restore cache while sing-box is stopped
   boot-restore    Safe boot-time cache restore (skips when not applicable)
   watchdog-check  One-shot observe-only sing-box/Podkop runtime sample
+  watchdog-check-bounded [seconds]  Manual process-isolated deadline (B4.1)
   watchdog-monitor [cycles] [interval]  Bounded RAM-only observer (default 6 x 20s)
   watchdog-observe  Continuous observe-only monitor (opt-in procd instance)
   watchdog-classify <local> <wan> <vpn> <doh>  Pure read-only classification of supplied evidence (no probes)
@@ -1876,6 +1986,7 @@ case "${1:-}" in
     cache-restore) cache_restore ;;
     boot-restore) boot_restore ;;
     watchdog-check) watchdog_check ;;
+    watchdog-check-bounded) shift; watchdog_check_bounded "$@" ;;
     watchdog-monitor) shift; watchdog_monitor "$@" ;;
     watchdog-observe) watchdog_observe ;;
     watchdog-classify) shift; watchdog_classify "$@" ;;

@@ -19,6 +19,12 @@ This is an independent project and is not part of or affiliated with Podkop.
 `watchdog-evidence` remains independent metadata-only collection and now prints the new two-axis result. It never invokes Failover, NetGuard or curl. It does not assert WAN reachability, and VPN/DoH remain UNKNOWN without separately validated evidence. All results end in `authority=observe-only action=none`. The previous experimental `CLASSIFY class=...` format has been replaced; stable `v0.2.4` remains unchanged. Recovery/fail-open require a separate, future policy gate. This code has not been installed on Redmi AX6000.
 
 
+### Stage B4.1: manually bounded local diagnostic
+
+`watchdog-check-bounded [seconds]` runs the existing `watchdog-check` using `setsid` in a separate session and verifies its own diagnostic PID/PGID/SID. A deadline of 3–120 seconds kills **only the isolated diagnostic process group** on expiry and returns `UNKNOWN reason=probe_hard_deadline`, never confirmed failure. Temporary files use RAM (`/tmp`). If process isolation cannot be verified, the check fails conservatively with `UNKNOWN` and no unsafe group signal.
+
+Not integrated into the resident observer or deployed on the Redmi AX6000. No action against actual sing-box, Podkop, VPN, LKG or routing. Pending CI/QEMU and fault-injection validation.
+
 ### Stage B3 — local DNS, loopback and conntrack (experimental)
 
 `watchdog-check` accepts FakeIP only for the **exact queried name** `fakeip.podkop.fyi`, and distinguishes real DNS replies `NXDOMAIN`, `SERVFAIL`, `REFUSED` from a DNS timeout. Error responses are not considered a hung sing-box; they yield `UNKNOWN`.

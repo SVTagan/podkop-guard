@@ -178,6 +178,9 @@ grep -Fq 'observer-only scenarios' /tmp/pg-b3-watch-tests
 sh /mnt/pg-bundle/watchdog-monitor.sh /usr/bin/podkop-guard > /tmp/pg-b3-monitor-tests
 grep -Fq 'deterministic monitor scenarios' /tmp/pg-b3-monitor-tests
 echo PASS_VM_B3_LOCAL_NEGATIVE_FIXTURES
+sh /mnt/pg-bundle/watchdog-deadline.sh /usr/bin/podkop-guard > /tmp/pg-b4-deadline
+grep -Fq 'B4.1 bounded cases' /tmp/pg-b4-deadline
+echo PASS_VM_B4_ISOLATED_DEADLINE
 
 
 # The real LKG daemon starts with default 300s startup grace. It must remain
