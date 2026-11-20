@@ -877,7 +877,12 @@ watch_nft_table() {
 # entirely local and should not depend on the selected VPN or external DNS.
 watch_fakeip() {
     printf '%s\n' "$WATCH_ANSWER" | awk '
-        /^Name:[[:space:]]/ { answer = 1; next }
+        /^Name:[[:space:]]/ {
+            name = tolower($2)
+            sub(/\\.$/, "", name)
+            answer = (name == "fakeip.podkop.fyi")
+            next
+        }
         answer && /^Address:[[:space:]]/ {
             n = split($2, octet, /\./)
             if (n == 4 && octet[1] == 198 &&
@@ -896,9 +901,10 @@ watch_probe_dns() {
     rc=$?
     # BusyBox nslookup exit codes vary; DNS error replies are not silence.
     case "$WATCH_ANSWER" in
-        *NXDOMAIN*|*"can't find"*|*'Non-existent domain'*) WATCH_DNS=nxdomain ;;
         *SERVFAIL*|*'server failure'*) WATCH_DNS=servfail ;;
         *REFUSED*|*'Connection refused'*|*'connection refused'*) WATCH_DNS=refused ;;
+        *NXDOMAIN*|*'Non-existent domain'*) WATCH_DNS=nxdomain ;;
+        *"can't find"*) WATCH_DNS=unconfirmed ;;
         *'timed out'*|*'no servers could be reached'*) WATCH_DNS=timeout ;;
         *)
             if [ "$rc" -eq 0 ] && watch_fakeip; then WATCH_DNS=fakeip
@@ -959,7 +965,8 @@ watch_conntrack_status() {
     [ -r "$base/nf_conntrack_count" ] && [ -r "$base/nf_conntrack_max" ] || return 1
     read -r count < "$base/nf_conntrack_count" || return 1
     read -r max < "$base/nf_conntrack_max" || return 1
-    case "$count:$max" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    case "$count" in ''|*[!0-9]*) return 1 ;; esac
+    case "$max" in ''|*[!0-9]*) return 1 ;; esac
     [ "${#count}" -le 12 ] && [ "${#max}" -le 12 ] || return 1
     [ "$max" -gt 0 ] || return 1
     threshold=$((max - max / 20))

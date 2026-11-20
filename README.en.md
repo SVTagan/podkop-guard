@@ -19,6 +19,14 @@ This is an independent project and is not part of or affiliated with Podkop.
 `watchdog-evidence` remains independent metadata-only collection and now prints the new two-axis result. It never invokes Failover, NetGuard or curl. It does not assert WAN reachability, and VPN/DoH remain UNKNOWN without separately validated evidence. All results end in `authority=observe-only action=none`. The previous experimental `CLASSIFY class=...` format has been replaced; stable `v0.2.4` remains unchanged. Recovery/fail-open require a separate, future policy gate. This code has not been installed on Redmi AX6000.
 
 
+### Stage B3 — local DNS, loopback and conntrack (experimental)
+
+`watchdog-check` accepts FakeIP only for the **exact queried name** `fakeip.podkop.fyi`, and distinguishes real DNS replies `NXDOMAIN`, `SERVFAIL`, `REFUSED` from a DNS timeout. Error responses are not considered a hung sing-box; they yield `UNKNOWN`.
+
+A timeout is evaluated against `nf_conntrack_count/max`: saturated conntrack produces `UNKNOWN reason=conntrack_pressure`, while missing/invalid counters produce `UNKNOWN reason=conntrack_unverified`. Local ICMP to `127.0.0.42` is only a supplemental control: it must previously succeed for the **same sing-box PID** returning FakeIP before a later ICMP failure can suppress DNS-hang suspicion. If ICMP was always filtered, it is not treated as failure; up to five baseline attempts per PID. The control resets across PID transitions. A missing process is reconciled a second time against procd to exclude a fast respawn race.
+
+This remains strictly `observe-only`: no recovery/fail-open, WAN/VPN/DoH external probes or dependency on Failover/NetGuard. The installed AX6000 worker is unchanged. Negative scenarios run in CI and under real OpenWrt BusyBox ash inside QEMU.
+
 ### Stage B2: bounded procd event subscription and reconciliation (experimental)
 
 `watchdog-procd-monitor [cycles] [interval]` is a **manual-only, bounded**, read-only event supervisor: it subscribes to `ubus -S subscribe service`, detects `ubusd` changes using PID + process start time, rebinds if the subscriber dies, and independently reads a fresh `watchdog-procd-snapshot` each cycle. A bounded RAM-backed FIFO is created in `/tmp` and removed at exit. Missed events cannot be recovered: **history=INCOMPLETE always**, including after a successful resubscription or healthy snapshot. A PID change without a captured event is logged as `state_change=UNEXPLAINED`, never as a confirmed crash.

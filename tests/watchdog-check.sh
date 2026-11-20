@@ -62,6 +62,7 @@ case "$WATCH_TEST_DNS" in
     refused) printf 'response REFUSED\n' >&2; exit 1 ;;
     unreachable) printf 'read: Connection refused\n' >&2; exit 1 ;;
     contradicted) printf 'Name: fakeip.podkop.fyi\nAddress: 198.18.0.194\nSERVFAIL\n'; exit 0 ;;
+    wrong_name) printf 'Name: other.example\nAddress: 198.18.0.194\n'; exit 0 ;;
     *) exit 9 ;;
 esac
 SH
@@ -98,6 +99,24 @@ case_run() {
         printf 'FAIL %s: rc=%s expected=%s: %s\n' "$name" "$rc" "$expected_rc" "$output" >&2
         exit 1
     fi
+    case "$dns" in
+        nxdomain|servfail|refused)
+            case "$output" in *" dns=$dns "*) ;; *)
+                echo "FAIL $name: incorrect DNS response classification: $output" >&2; exit 1 ;;
+            esac ;;
+        unreachable)
+            case "$output" in *' dns=refused '*) ;; *)
+                echo "FAIL $name: refused packet classification: $output" >&2; exit 1 ;;
+            esac ;;
+        contradicted)
+            case "$output" in *' dns=servfail '*) ;; *)
+                echo "FAIL $name: contradictory DNS reply marked healthy: $output" >&2; exit 1 ;;
+            esac ;;
+        wrong_name)
+            case "$output" in *' dns=unconfirmed '*) ;; *)
+                echo "FAIL $name: foreign DNS name marked healthy: $output" >&2; exit 1 ;;
+            esac ;;
+    esac
     tests=$((tests + 1))
     printf 'PASS %s\n' "$name"
 }
@@ -111,6 +130,7 @@ case_run dns_servfail     UNKNOWN                 2 servfail  present 12345 true
 case_run dns_refused      UNKNOWN                 2 refused   present 12345 true  0 valid up
 case_run dns_port_refused UNKNOWN                 2 unreachable present 12345 true 0 valid up
 case_run contradicted     UNKNOWN                 2 contradicted present 12345 true 0 valid up
+case_run wrong_name       UNKNOWN                 2 wrong_name present 12345 true 0 valid up
 case_run no_process       SUSPECT_PROCESS_MISSING 1 healthy   present none  false 0 valid up
 case_run manual_stop      INACTIVE                0 healthy   absent  none  false 1 valid up
 case_run nft_missing      UNKNOWN                 2 healthy   absent  12345 true  0 valid up

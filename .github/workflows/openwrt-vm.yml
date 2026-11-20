@@ -42,10 +42,13 @@ jobs:
           mkdir -p vm-input
           cp install.sh podkop-guard podkop-guard.init vm-input/
           cp tests/openwrt-installer-e2e.sh tests/openwrt-real-worker-e2e.sh tests/openwrt-multi-srs-e2e.sh vm-input/
+          cp tests/watchdog-check.sh tests/watchdog-monitor.sh vm-input/
           sh -n vm-input/install.sh
           sh -n vm-input/podkop-guard
           sh -n vm-input/openwrt-installer-e2e.sh
           sh -n vm-input/openwrt-real-worker-e2e.sh
+          sh -n vm-input/watchdog-check.sh
+          sh -n vm-input/watchdog-monitor.sh
           sh -n vm-input/openwrt-multi-srs-e2e.sh
           mkdir -p vm-input/srs
           release='2026-11-09_19-01'
