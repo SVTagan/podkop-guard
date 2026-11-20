@@ -110,6 +110,36 @@ esac
 passed=$((passed+1))
 printf 'PASS disconnected_bus\n'
 
+# The explicit continuous observer must honor SIGTERM and reap its own
+# subscriber without leaving a FIFO in tmpfs.
+PROCD_B2_MODE=quiet; export PROCD_B2_MODE
+printf 'BUS1\n' > "$PROCD_B2_BUS_FILE"
+rm -f "$PROCD_B2_COUNT" "$PROCD_B2_SUB_LOG" "$PROCD_B2_FORBIDDEN"
+bash "$worker" watchdog-procd-follow > "$tmp/follow.log" 2>&1 &
+follow_pid=$!
+sleep 2
+kill -TERM "$follow_pid" 2>/dev/null || :
+loops=0
+while kill -0 "$follow_pid" 2>/dev/null && [ "$loops" -lt 9 ]; do
+    sleep 1
+    loops=$((loops + 1))
+done
+if kill -0 "$follow_pid" 2>/dev/null; then
+    kill -KILL "$follow_pid" 2>/dev/null || :
+    wait "$follow_pid" 2>/dev/null || :
+    echo 'FAIL follow SIGTERM not handled' >&2
+    exit 1
+fi
+wait "$follow_pid" 2>/dev/null || :
+grep -Fq 'PROCD_MONITOR_END completed=' "$tmp/follow.log" || {
+    echo 'FAIL follow did not exit cleanly' >&2; exit 1;
+}
+[ -z "$(find "$tmp/ram" -mindepth 1 -print -quit)" ] || {
+    echo 'FAIL follow left FIFO in tmpfs' >&2; exit 1;
+}
+passed=$((passed + 1))
+printf 'PASS follow_sigterm_cleanup\n'
+
 for args in '--restart' '0 1' '31 1' '2 0' '2 31' 'oops 1'; do
     set +e
     bash "$worker" watchdog-procd-monitor $args >/dev/null 2>&1
