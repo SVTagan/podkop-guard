@@ -173,7 +173,7 @@ TEST_IFACE='awg0_2;id'
 run_case unsafe_interface --live 'vpn=UNKNOWN vpn_source=invalid_interface' LOCAL_HEALTHY_EXTERNAL_UNVERIFIED 'wan '
 TEST_IFACE=awg0_2
 TEST_VPN_SAMPLE=broken
-run_case invalid_vpn_checker --live 'vpn=UNKNOWN vpn_source=failover_unconfirmed' LOCAL_HEALTHY_EXTERNAL_UNVERIFIED 'wan '
+run_case invalid_vpn_checker --live 'vpn=UNKNOWN vpn_source=failover_unconfirmed' LOCAL_HEALTHY_EXTERNAL_UNVERIFIED 'wan vpn '
 
 # A slow active VPN probe must be invalidated when Failover changes UCI.
 TEST_VPN_SAMPLE=healthy
