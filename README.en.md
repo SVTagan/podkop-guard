@@ -14,6 +14,14 @@ This is an independent project and is not part of or affiliated with Podkop.
 
 The development branch includes `podkop-guard watchdog-classify <local> <wan> <vpn> <doh>`. This is a **pure classification of supplied evidence**, not a live WAN/VPN/DoH probe, background task or recovery engine. Example: `podkop-guard watchdog-classify HEALTHY_SAMPLED UP FAILED HEALTHY` returns `class=VPN_UNAVAILABLE ... authority=observe-only action=none`. WAN UP/DOWN evidence requires independently verified WAN connectivity (not merely netifd link state); VPN and DoH require separate probes. Unknown/contradictory signals are conservatively classified and **never authorize recovery**. This is not wired into the running `watchdog-observe` or procd instance; only synthetic CI cases have been added so far.
 
+### Stage 6B1: manual evidence collection (experimental)
+
+`podkop-guard watchdog-evidence` performs one local `watchdog-check` and reads the WAN state using `netifd/ubus` and, if available, physical link `carrier`. It makes no external network requests. `netifd up=true` **does not imply `WAN=UP`**: link state is not Internet reachability. A confirmed carrier loss on an inactive WAN yields local `WAN=DOWN`, not proof of an ISP-side outage.
+
+`podkop-guard watchdog-evidence --live` additionally calls the **optional** installed `netguard-wan-check check` and `podkop-vpn-failover check <active AWG>`. NetGuard can confirm `WAN=UP` only from its strict positive `HEALTHY_SAMPLED` sample; failed external HTTPS targets remain `UNKNOWN`. Failover's read-only probe checks only the currently selected VPN and does not switch interfaces. These are explicitly requested HTTPS probes: they can time out and may use transient `/tmp` files, but do not modify UCI, routes or running services. The adapter rechecks the local probe and active VPN after a live sample and classifies changes as `TRANSITION`.
+
+**DoH stays UNKNOWN in both modes** until a real RFC 8484 DNS response checker is added; local FakeIP and ordinary HTTPS cannot establish DoH upstream health. Output is always `authority=observe-only action=none`. This command is not integrated into continuous `watchdog-observe` and is not present on the already-installed Guard worker until a separate controlled upgrade. No new code has been installed on Redmi AX6000. Do not schedule `--live` as a continuous background probe.
+
 ## Status
 
 Current stable version: **0.2.4**.
