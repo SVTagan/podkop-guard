@@ -122,6 +122,64 @@ if grep -q 'state=HEALTHY_SAMPLED' /tmp/pg-real-watch-check; then
     echo "FAIL_REAL_FALSE_HEALTHY" >&2
     exit 1
 fi
+# The new evidence adapter is manual-only. In this VM there are no WAN
+# profiles or real Podkop/VPN, so it MUST leave external health unverified.
+# This default invocation must not make any external HTTPS requests.
+if ! /usr/bin/podkop-guard watchdog-evidence > /tmp/pg-real-evidence 2>&1; then
+    cat /tmp/pg-real-evidence >&2
+    echo FAIL_VM_REAL_EVIDENCE >&2
+    exit 1
+fi
+grep -q '^EVIDENCE local=' /tmp/pg-real-evidence
+grep -q 'doh=UNKNOWN doh_source=not_probed mode=metadata \
+    /usr/bin/podkop-guard watchdog-monitor 3 0 > /tmp/pg-real-monitor
+grep -q '^MONITOR_END completed=3 confirmations=0 action=none$' /tmp/pg-real-monitor
+echo PASS_VM_REAL_WORKER_OBSERVE_ONLY
+
+# The real LKG daemon starts with default 300s startup grace. It must remain
+# running under real procd, without performing any refresh in this short test.
+# The independent watchdog uses the same actual source, opt-in only.
+uci -q set podkop_guard.settings.watchdog_enabled=1
+/etc/init.d/podkop-guard start
+sleep 2
+svc=$(ubus call service list '{"name":"podkop-guard"}')
+printf '%s\n' "$svc" | grep -q '"instance1"'
+printf '%s\n' "$svc" | grep -q '"watchdog"'
+printf '%s\n' "$svc" | grep -q '"running": true'
+/etc/init.d/podkop-guard running
+[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+echo PASS_VM_REAL_WORKER_PROCD_BOTH
+
+# Do not wait 60 seconds to stop the long sleeping LKG worker: the bounded
+# workflow terminates the disposable QEMU instance after the check.
+echo OPENWRT_REAL_WORKER_E2E_PASS
+ /tmp/pg-real-evidence
+grep -q 'authority=observe-only action=none \
+    /usr/bin/podkop-guard watchdog-monitor 3 0 > /tmp/pg-real-monitor
+grep -q '^MONITOR_END completed=3 confirmations=0 action=none$' /tmp/pg-real-monitor
+echo PASS_VM_REAL_WORKER_OBSERVE_ONLY
+
+# The real LKG daemon starts with default 300s startup grace. It must remain
+# running under real procd, without performing any refresh in this short test.
+# The independent watchdog uses the same actual source, opt-in only.
+uci -q set podkop_guard.settings.watchdog_enabled=1
+/etc/init.d/podkop-guard start
+sleep 2
+svc=$(ubus call service list '{"name":"podkop-guard"}')
+printf '%s\n' "$svc" | grep -q '"instance1"'
+printf '%s\n' "$svc" | grep -q '"watchdog"'
+printf '%s\n' "$svc" | grep -q '"running": true'
+/etc/init.d/podkop-guard running
+[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+echo PASS_VM_REAL_WORKER_PROCD_BOTH
+
+# Do not wait 60 seconds to stop the long sleeping LKG worker: the bounded
+# workflow terminates the disposable QEMU instance after the check.
+echo OPENWRT_REAL_WORKER_E2E_PASS
+ /tmp/pg-real-evidence
+[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+echo PASS_VM_REAL_EVIDENCE_METADATA_ONLY
+
 # Bounded observation has no recovery, regardless of missing VPN.
 PODKOP_GUARD_WATCH_GRACE=180 \
     /usr/bin/podkop-guard watchdog-monitor 3 0 > /tmp/pg-real-monitor
