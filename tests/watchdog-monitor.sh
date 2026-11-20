@@ -133,7 +133,10 @@ deadline_start=$(date +%s)
 MONITOR_TEST_DEADLINE=3 run_case deadline_breaks_streak 'reason=probe_hard_deadline' 0 \
     "$H" "$T" "$T" "HANG|101|1" "$T" "$T"
 deadline_elapsed=$(( $(date +%s) - deadline_start ))
-[ "$deadline_elapsed" -lt 20 ] || {
+# Six samples include normal scheduling and per-sample polling. On stock
+# OpenWrt integer-only sleep they can take ~20s. Still reject waiting for
+# the injected sleep 35 to end naturally (that would exceed this bound).
+[ "$deadline_elapsed" -lt 45 ] || {
     echo "FAIL monitor bounded sequence took ${deadline_elapsed}s" >&2; exit 1;
 }
 read -r child < "$tmp/childpid"
