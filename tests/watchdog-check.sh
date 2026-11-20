@@ -54,6 +54,7 @@ cat > "$tmp/bin/nslookup" <<'SH'
 case "$WATCH_TEST_DNS" in
     healthy) printf 'Server: 127.0.0.42\nAddress: 127.0.0.42:53\n\nName: fakeip.podkop.fyi\nAddress: 198.18.0.194\n' ;;
     highrange) printf 'Name: fakeip.podkop.fyi\nAddress: 198.19.255.255\n' ;;
+    terminal_dot) printf 'Name: fakeip.podkop.fyi.\nAddress: 198.18.0.194\n' ;;
     timeout) printf ';; connection timed out; no servers could be reached\n' >&2; exit 1 ;;
     invalid) printf 'Name: fakeip.podkop.fyi\nAddress: 203.0.113.9\n' ;;
     banner) printf 'Server: 127.0.0.42\nAddress: 198.18.0.194\n'; exit 0 ;;
@@ -122,6 +123,7 @@ case_run() {
 }
 case_run healthy          HEALTHY_SAMPLED         0 healthy   present 12345 true  0 valid up
 case_run last_fakeip      HEALTHY_SAMPLED         0 highrange present 12345 true  0 valid up
+case_run trailing_dot     HEALTHY_SAMPLED         0 terminal_dot present 12345 true 0 valid up
 case_run dns_timeout      SUSPECT_DNS_TIMEOUT     1 timeout   present 12345 true  0 valid up
 case_run dns_invalid      UNKNOWN                 2 invalid   present 12345 true  0 valid up
 case_run server_only      UNKNOWN                 2 banner    present 12345 true  0 valid up

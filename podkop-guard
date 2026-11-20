@@ -879,7 +879,7 @@ watch_fakeip() {
     printf '%s\n' "$WATCH_ANSWER" | awk '
         /^Name:[[:space:]]/ {
             name = tolower($2)
-            sub(/\\.$/, "", name)
+            sub(/\.$/, "", name)
             answer = (name == "fakeip.podkop.fyi")
             next
         }
