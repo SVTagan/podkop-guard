@@ -22,7 +22,15 @@ SH
 cat > "$tmp/bin/jsonfilter" <<'SH'
 #!/bin/sh
 case "$4" in
-    *'"pid"'*) printf '%s\n' "$WATCH_TEST_PID" ;;
+    *'"pid"'*)
+        if [ "${WATCH_TEST_PID_RETURN:-0}" = 1 ]; then
+            n=$(cat "$WATCH_TEST_PID_COUNTER" 2>/dev/null || echo 0)
+            n=$((n + 1))
+            printf '%s\n' "$n" > "$WATCH_TEST_PID_COUNTER"
+            if [ "$n" -ge 2 ]; then echo 54321; else echo none; fi
+        else
+            printf '%s\n' "$WATCH_TEST_PID"
+        fi ;;
     *'"running"'*) printf '%s\n' "$WATCH_TEST_RUNNING" ;;
     *) exit 9 ;;
 esac
@@ -80,6 +88,7 @@ case_run() {
     name=$1 expected=$2 expected_rc=$3 dns=$4 nft=$5 pid=$6 running=$7 shutdown=$8 config=$9
     shift 9
     procd=$1
+    rm -f "$tmp/pid-counter"
     set +e
     output=$(env PATH="$tmp/bin:$PATH" \
         PODKOP_GUARD_WATCH_CONFIG="$tmp/config.json" \
@@ -89,6 +98,7 @@ case_run() {
         WATCH_TEST_DNS="$dns" WATCH_TEST_NFT="$nft" WATCH_TEST_PID="$pid" \
         WATCH_TEST_RUNNING="$running" WATCH_TEST_SHUTDOWN="$shutdown" \
         WATCH_TEST_CONFIG="$config" WATCH_TEST_PROCD="$procd" \
+        WATCH_TEST_PID_COUNTER="$tmp/pid-counter" \
         sh "$script" watchdog-check 2>&1)
     rc=$?
     set -e
@@ -116,6 +126,24 @@ case_run() {
         wrong_name)
             case "$output" in *' dns=unconfirmed '*) ;; *)
                 echo "FAIL $name: foreign DNS name marked healthy: $output" >&2; exit 1 ;;
+            esac ;;
+    esac
+    case "$name" in
+        conntrack_unavailable|conntrack_invalid)
+            case "$output" in *'reason=conntrack_unverified '*) ;; *)
+                echo "FAIL $name: missing unverified reason $output" >&2; exit 1 ;;
+            esac ;;
+        conntrack_pressure)
+            case "$output" in *'reason=conntrack_pressure '*) ;; *)
+                echo "FAIL $name: pressure reason missing $output" >&2; exit 1 ;;
+            esac ;;
+        control_suppresses_suspect)
+            case "$output" in *'reason=loopback_unresponsive '*) ;; *)
+                echo "FAIL $name: loopback control did not suppress timeout $output" >&2; exit 1 ;;
+            esac ;;
+        procd_rapid_respawn)
+            case "$output" in *'reason=procd_returned '*) ;; *)
+                echo "FAIL $name: procd replacement not treated as transition $output" >&2; exit 1 ;;
             esac ;;
     esac
     tests=$((tests + 1))
@@ -189,5 +217,11 @@ case_run control_recovers SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 val
 PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID=67890
 case_run old_pid_no_control SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
 unset PODKOP_GUARD_WATCH_CONTROL_PROBE PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID WATCH_TEST_PING
+
+# A new procd instance between samples is a transition, not missing process.
+WATCH_TEST_PID_RETURN=1
+export WATCH_TEST_PID_RETURN
+case_run procd_rapid_respawn TRANSITION 0 healthy present none true 0 valid up
+unset WATCH_TEST_PID_RETURN
 
 printf 'PASS: %s observer-only scenarios\n' "$tests"

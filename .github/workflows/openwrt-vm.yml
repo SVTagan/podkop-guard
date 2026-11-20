@@ -8,6 +8,8 @@ on:
       - tests/openwrt-qemu.py
       - tests/openwrt-installer-e2e.sh
       - tests/openwrt-real-worker-e2e.sh
+      - tests/watchdog-check.sh
+      - tests/watchdog-monitor.sh
       - tests/openwrt-multi-srs-e2e.sh
       - podkop-guard
       - install.sh
