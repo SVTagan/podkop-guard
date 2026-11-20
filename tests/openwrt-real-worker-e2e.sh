@@ -169,51 +169,14 @@ PODKOP_GUARD_WATCH_GRACE=180 \
 grep -q '^MONITOR_END completed=3 confirmations=0 action=none$' /tmp/pg-real-monitor
 echo PASS_VM_REAL_WORKER_OBSERVE_ONLY
 
-# B3 deterministic mock cases executed with actual OpenWrt BusyBox ash.
-# No live DNS, WAN, Podkop restart or VPN probes are invoked by these tests.
-/bin/sh /mnt/pg-bundle/watchdog-check.sh /usr/bin/podkop-guard > /tmp/pg-b3-watch-tests
-grep -q '^PASS: .*observer-only scenarios
-
-# The real LKG daemon starts with default 300s startup grace. It must remain
-# running under real procd, without performing any refresh in this short test.
-# The independent watchdog uses the same actual source, opt-in only.
-uci -q set podkop_guard.settings.watchdog_enabled=1
-/etc/init.d/podkop-guard start
-sleep 2
-svc=$(ubus call service list '{"name":"podkop-guard"}')
-printf '%s\n' "$svc" | grep -q '"instance1"'
-printf '%s\n' "$svc" | grep -q '"watchdog"'
-printf '%s\n' "$svc" | grep -q '"running": true'
-/etc/init.d/podkop-guard running
-[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
-echo PASS_VM_REAL_WORKER_PROCD_BOTH
-
-# Do not wait 60 seconds to stop the long sleeping LKG worker: the bounded
-# workflow terminates the disposable QEMU instance after the check.
-echo OPENWRT_REAL_WORKER_E2E_PASS
- /tmp/pg-b3-watch-tests
-/bin/sh /mnt/pg-bundle/watchdog-monitor.sh /usr/bin/podkop-guard > /tmp/pg-b3-monitor-tests
-grep -q '^PASS: .*deterministic monitor scenarios
-
-# The real LKG daemon starts with default 300s startup grace. It must remain
-# running under real procd, without performing any refresh in this short test.
-# The independent watchdog uses the same actual source, opt-in only.
-uci -q set podkop_guard.settings.watchdog_enabled=1
-/etc/init.d/podkop-guard start
-sleep 2
-svc=$(ubus call service list '{"name":"podkop-guard"}')
-printf '%s\n' "$svc" | grep -q '"instance1"'
-printf '%s\n' "$svc" | grep -q '"watchdog"'
-printf '%s\n' "$svc" | grep -q '"running": true'
-/etc/init.d/podkop-guard running
-[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
-echo PASS_VM_REAL_WORKER_PROCD_BOTH
-
-# Do not wait 60 seconds to stop the long sleeping LKG worker: the bounded
-# workflow terminates the disposable QEMU instance after the check.
-echo OPENWRT_REAL_WORKER_E2E_PASS
- /tmp/pg-b3-monitor-tests
+# B3: deterministic local-fault fixtures under REAL OpenWrt BusyBox ash.
+# No WAN, VPN, real DNS or service restarts are involved.
+sh /mnt/pg-bundle/watchdog-check.sh /usr/bin/podkop-guard > /tmp/pg-b3-watch-tests
+grep -Fq 'observer-only scenarios' /tmp/pg-b3-watch-tests
+sh /mnt/pg-bundle/watchdog-monitor.sh /usr/bin/podkop-guard > /tmp/pg-b3-monitor-tests
+grep -Fq 'deterministic monitor scenarios' /tmp/pg-b3-monitor-tests
 echo PASS_VM_B3_LOCAL_NEGATIVE_FIXTURES
+
 
 # The real LKG daemon starts with default 300s startup grace. It must remain
 # running under real procd, without performing any refresh in this short test.
