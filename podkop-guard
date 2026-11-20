@@ -1545,7 +1545,7 @@ watchdog_procd_stop_subscriber() {
 
 watchdog_procd_cleanup() {
     watchdog_procd_stop_subscriber
-    exec 3>&- 2>/dev/null || :
+    exec 3>&-
     if [ -n "$WATCH_PROCD_DIR" ]; then
         rm -f "$WATCH_PROCD_DIR/events"
         rmdir "$WATCH_PROCD_DIR" 2>/dev/null || :
@@ -1554,7 +1554,7 @@ watchdog_procd_cleanup() {
 }
 
 watchdog_procd_reset_fifo() {
-    exec 3>&- 2>/dev/null || :
+    exec 3>&-
     rm -f "$WATCH_PROCD_DIR/events"
     mkfifo "$WATCH_PROCD_DIR/events" || return 1
     exec 3<>"$WATCH_PROCD_DIR/events" || return 1
