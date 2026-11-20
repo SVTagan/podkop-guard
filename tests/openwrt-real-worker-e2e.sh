@@ -158,7 +158,9 @@ PODKOP_GUARD_PROCD_TMP_DIR=/tmp \
     /usr/bin/podkop-guard watchdog-procd-monitor 2 1 > /tmp/pg-procd-monitor
 grep -q '^PROCD_MONITOR_END completed=2 attempts=' /tmp/pg-procd-monitor
 grep -Fq 'history=INCOMPLETE action=none' /tmp/pg-procd-monitor
-[ -z "$(find /tmp -maxdepth 1 -name 'podkop-guard-procd.*' -print -quit)" ]
+# BusyBox find may lack -quit; check the actual result and its exit status.
+find /tmp -type d -name 'podkop-guard-procd.*' -print > /tmp/pg-procd-leftovers
+[ ! -s /tmp/pg-procd-leftovers ]
 echo PASS_VM_PROCD_SUBSCRIBE_BOUNDED
 
 
