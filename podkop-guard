@@ -1101,8 +1101,9 @@ watch_monitor_now() {
     WATCH_MONITOR_NOW=$whole
 }
 
-# B4.1: explicit (manual) bounded local probe. Not yet in resident observer.
-# Only our own verified isolated diagnostic process group can be killed.
+# B4.1: explicit isolated sample, not connected to the permanent observer.
+# A BusyBox setsid launcher may fork. The session leader therefore writes
+# its own PID to a private RAM file; the launcher PID is NOT trusted.
 watch_bounded_group_owned() {
     local pid
     pid=$1
@@ -1127,18 +1128,22 @@ watch_bounded_cleanup() {
     fi
     if [ -n "$WATCH_BOUND_PID" ]; then
         watch_bounded_stop_group "$WATCH_BOUND_PID" || :
-        wait "$WATCH_BOUND_PID" 2>/dev/null || :
         WATCH_BOUND_PID=
     fi
+    if [ -n "$WATCH_BOUND_LAUNCHER" ]; then
+        wait "$WATCH_BOUND_LAUNCHER" 2>/dev/null || :
+        WATCH_BOUND_LAUNCHER=
+    fi
     if [ -n "$WATCH_BOUND_DIR" ]; then
-        rm -f "$WATCH_BOUND_DIR/result" "$WATCH_BOUND_DIR/expired"
+        rm -f "$WATCH_BOUND_DIR/pid" "$WATCH_BOUND_DIR/result" \
+            "$WATCH_BOUND_DIR/rc" "$WATCH_BOUND_DIR/expired"
         rmdir "$WATCH_BOUND_DIR" 2>/dev/null || :
         WATCH_BOUND_DIR=
     fi
 }
 
 watchdog_check_bounded() (
-    local limit script rc tries
+    local limit script rc tries launchpid
     [ "$#" -le 1 ] || { err "usage: watchdog-check-bounded [seconds 3..120]"; exit 2; }
     limit="$1"
     [ -n "$limit" ] || limit="$PODKOP_GUARD_WATCH_MAX_SAMPLE"
@@ -1150,61 +1155,68 @@ watchdog_check_bounded() (
     [ -n "$script" ] || script="$0"
     [ -r "$script" ] && command -v setsid >/dev/null 2>&1 &&
         command -v mktemp >/dev/null 2>&1 || {
-        printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unavailable\n'
-        exit 2
+        printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unavailable\n'; exit 2
     }
     WATCH_BOUND_DIR=$(mktemp -d "/tmp/podkop-guard-probe.XXXXXX") || {
-        printf 'WATCHDOG state=UNKNOWN reason=probe_tmp_unavailable\n'
-        exit 2
+        printf 'WATCHDOG state=UNKNOWN reason=probe_tmp_unavailable\n'; exit 2
     }
     WATCH_BOUND_PID=
+    WATCH_BOUND_LAUNCHER=
     WATCH_BOUND_TIMER=
     trap 'watch_bounded_cleanup' EXIT
     trap 'exit 2' TERM INT
-    setsid sh "$script" watchdog-check > "$WATCH_BOUND_DIR/result" 2>&1 &
-    WATCH_BOUND_PID=$!
+    # The true session leader writes its PID even if setsid forked itself.
+    # The test script executes only the existing read-only watchdog-check.
+    setsid sh -c '
+        printf "%s\n" "$$" > "$2/pid"
+        sh "$1" watchdog-check > "$2/result" 2>&1
+        printf "%s\n" "$?" > "$2/rc"
+    ' b4 "$script" "$WATCH_BOUND_DIR" >/dev/null 2>&1 &
+    WATCH_BOUND_LAUNCHER=$!
     tries=0
-    while ! watch_bounded_group_owned "$WATCH_BOUND_PID" && [ "$tries" -lt 10 ]; do
+    while [ ! -s "$WATCH_BOUND_DIR/pid" ] && [ "$tries" -lt 30 ]; do
         tries=$((tries + 1))
         sleep 0.1
     done
+    if [ ! -s "$WATCH_BOUND_DIR/pid" ]; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_start_unverified\n'; exit 2
+    fi
+    read -r WATCH_BOUND_PID < "$WATCH_BOUND_DIR/pid" || WATCH_BOUND_PID=
+    case "$WATCH_BOUND_PID" in ''|*[!0-9]*)
+        WATCH_BOUND_PID=
+        printf 'WATCHDOG state=UNKNOWN reason=probe_pid_invalid\n'; exit 2 ;;
+    esac
     if ! watch_bounded_group_owned "$WATCH_BOUND_PID"; then
-        # Unsafe to signal a guessed group. Signal only our own direct child.
-        kill -KILL "$WATCH_BOUND_PID" 2>/dev/null || :
-        printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unverified\n'
-        exit 2
+        printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unverified\n'; exit 2
     fi
     (
         sleep "$limit"
-        if watch_bounded_group_owned "$WATCH_BOUND_PID"; then
+        if [ ! -f "$WATCH_BOUND_DIR/rc" ]; then
             : > "$WATCH_BOUND_DIR/expired"
             watch_bounded_stop_group "$WATCH_BOUND_PID" || :
         fi
     ) &
     WATCH_BOUND_TIMER=$!
-    wait "$WATCH_BOUND_PID"
-    rc=$?
-    WATCH_BOUND_PID=
+    while [ ! -f "$WATCH_BOUND_DIR/rc" ] && [ ! -f "$WATCH_BOUND_DIR/expired" ]; do
+        sleep 0.1
+    done
     if [ -f "$WATCH_BOUND_DIR/expired" ]; then
         wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
         WATCH_BOUND_TIMER=
-        printf 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline\n'
-        exit 2
+        printf 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline\n'; exit 2
     fi
     kill -TERM "$WATCH_BOUND_TIMER" 2>/dev/null || :
     wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
     WATCH_BOUND_TIMER=
+    read -r rc < "$WATCH_BOUND_DIR/rc" || rc=invalid
     case "$rc" in 0|1|2) ;; *)
-        printf 'WATCHDOG state=UNKNOWN reason=probe_invalid_exit\n'
-        exit 2 ;;
+        printf 'WATCHDOG state=UNKNOWN reason=probe_invalid_exit\n'; exit 2 ;;
     esac
     [ -s "$WATCH_BOUND_DIR/result" ] || {
-        printf 'WATCHDOG state=UNKNOWN reason=probe_empty_output\n'
-        exit 2
+        printf 'WATCHDOG state=UNKNOWN reason=probe_empty_output\n'; exit 2
     }
     [ "$(wc -c < "$WATCH_BOUND_DIR/result")" -le 2048 ] || {
-        printf 'WATCHDOG state=UNKNOWN reason=probe_oversize_output\n'
-        exit 2
+        printf 'WATCHDOG state=UNKNOWN reason=probe_oversize_output\n'; exit 2
     }
     cat "$WATCH_BOUND_DIR/result"
     exit "$rc"
