@@ -140,6 +140,19 @@ grep -Fq 'authority=observe-only action=none' /tmp/pg-local-classify
 echo PASS_VM_TWO_AXIS_LOCAL_INDEPENDENCE
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
 echo PASS_VM_REAL_EVIDENCE_METADATA_ONLY
+# Actual OpenWrt procd service is queried, no sing-box instance is started.
+# An unregistered instance must not be interpreted as a crash-loop.
+procd_snapshot=$(/usr/bin/podkop-guard watchdog-procd-snapshot)
+case "$procd_snapshot" in
+    'PROCD_SNAPSHOT state=UNREGISTERED '* | 'PROCD_SNAPSHOT state=STOPPED '* | 'PROCD_SNAPSHOT state=UNKNOWN '*) ;;
+    *) echo "FAIL_VM_PROCD_UNEXPECTED $procd_snapshot" >&2; exit 1 ;;
+esac
+[ "${procd_snapshot##*action=}" = none ]
+printf '%s\n' '{"instance.fail":{"service":"sing-box","instance":"sing-box.main","pid":1253,"exit_code":137,"respawn_count":6,"command":["/usr/bin/sing-box","run"]}}' |
+    /usr/bin/podkop-guard watchdog-procd-event > /tmp/pg-real-procd-event
+grep -Fq 'state=CRASH_LOOP_REPORTED source=procd pid=1253 exit_code=137 respawn_count=6 action=none' /tmp/pg-real-procd-event
+echo PASS_VM_PROCD_EVENT_DECODER
+
 
 # Bounded observation has no recovery, regardless of missing VPN.
 PODKOP_GUARD_WATCH_GRACE=180 \

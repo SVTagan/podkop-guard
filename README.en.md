@@ -19,6 +19,13 @@ This is an independent project and is not part of or affiliated with Podkop.
 `watchdog-evidence` remains independent metadata-only collection and now prints the new two-axis result. It never invokes Failover, NetGuard or curl. It does not assert WAN reachability, and VPN/DoH remain UNKNOWN without separately validated evidence. All results end in `authority=observe-only action=none`. The previous experimental `CLASSIFY class=...` format has been replaced; stable `v0.2.4` remains unchanged. Recovery/fail-open require a separate, future policy gate. This code has not been installed on Redmi AX6000.
 
 
+### Stage B1: procd event diagnostics without process control
+
+Experimental `watchdog-procd-event` reads **one JSON event line** from `ubus -S subscribe service` on stdin. It recognizes only `sing-box` / `sing-box.main`, mapping `instance.respawn` to `RESPAWN_REPORTED` and `instance.fail` to `CRASH_LOOP_REPORTED`. Routine start/stop and unrelated services are not treated as crashes. Malformed events are `UNKNOWN`, with no raw event echoed to logs; every result is `action=none`.
+
+`watchdog-procd-snapshot` independently reconciles the current procd instance through `ubus service list`: `RUNNING`, `STOPPED`, `UNREGISTERED`, or `UNKNOWN`. Exit codes alone do not establish a crash cause. This **does not yet subscribe continuously** or handle `ubusd` restart/event loss; those steps require further testing. The real `/usr/bin/sing-box` is distinguished from offline validation processes. Nothing is wired to the persistent observer or recovery, and no processes are signalled or restarted.
+
+
 ### Independent local evidence collection (stage 6B1.2, experimental)
 
 `podkop-guard watchdog-evidence` runs two local `watchdog-check` samples around a read-only snapshot of the WAN and selected AWG interface through `netifd/ubus` (and the physical link `carrier` when available). It **does not invoke** `owrt-netguard`, `podkop-vpn-failover`, or `curl`. No external connectivity probes, service changes, route changes, or UCI writes occur, and no companion project is required. Interface names are validated before use.
