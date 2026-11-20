@@ -26,6 +26,12 @@ IFS=$oldifs
 if [ -n "$simulated_uptime" ]; then
     printf '%s\n' "$simulated_uptime" > "$MONITOR_TEST_UPTIME_FILE"
 fi
+if [ "$state" = HANG ]; then
+    (sleep 35) &
+    printf '%s\n' "$!" > "$MONITOR_TEST_CHILD_PID_FILE"
+    wait
+    exit 9
+fi
 suffix=
 if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
     if [ "$state" = HEALTHY_SAMPLED ] &&
@@ -57,6 +63,8 @@ run_case() {
       MONITOR_TEST_FIXTURE="$tmp/fixture" \
       MONITOR_TEST_COUNTER="$tmp/counter" \
       MONITOR_TEST_UPTIME_FILE="$tmp/uptime" \
+      MONITOR_TEST_CHILD_PID_FILE="$tmp/childpid" \
+      PODKOP_GUARD_WATCH_MAX_SAMPLE="${MONITOR_TEST_DEADLINE:-8}" \
       PODKOP_GUARD_WATCH_CHECK_SCRIPT="$tmp/mock-check" \
       PODKOP_GUARD_WATCH_UPTIME_FILE="$tmp/uptime" \
       PODKOP_GUARD_WATCH_GRACE=0 \
@@ -106,6 +114,19 @@ run_case validated_loopback_suppression 'reason=loopback_unresponsive' 0 "$H" "$
 unset MONITOR_TEST_CONTROL_MODE
 run_case late_probe_rejected 'reason=probe_late' 0 \
     "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"
+# A hard deadline is UNKNOWN, and the suspect streak must restart from zero.
+MONITOR_TEST_DEADLINE=3 run_case deadline_breaks_streak 'reason=probe_hard_deadline' 0 \
+    "$H" "$T" "$T" "HANG|101|1" "$T" "$T"
+read -r child < "$tmp/childpid"
+case "$child" in ''|*[!0-9]*) echo "FAIL invalid monitor child PID" >&2; exit 1 ;; esac
+if [ -r "/proc/$child/stat" ]; then
+    stat=$(cat "/proc/$child/stat")
+    case "$stat" in *') Z '*) ;; *)
+        echo "FAIL monitor child remains running: $child" >&2; exit 1 ;;
+    esac
+fi
+passed=$((passed + 1))
+echo 'PASS deadline_no_running_orphan'
 
 # A missing process during the initial boot grace is not confirmed.
 printf '%s\n' "$M" "$M" "$M" > "$tmp/fixture"
@@ -143,4 +164,10 @@ for seconds in 0 4 301 abc; do
     }
 done
 passed=$((passed + 1))
-printf 'PASS continuous-interval-safety\nPASS: %s deterministic monitor scenarios\n' "$passed"
+set +e
+PODKOP_GUARD_WATCH_MAX_SAMPLE=21 sh "$script" watchdog-observe >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || { echo "FAIL continuous deadline boundary rc=$rc" >&2; exit 1; }
+passed=$((passed + 1))
+printf 'PASS continuous-interval-safety\nPASS resident-deadline-safety\nPASS: %s deterministic monitor scenarios\n' "$passed"

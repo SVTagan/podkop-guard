@@ -59,4 +59,41 @@ for bad in 0 2 121 abc; do
     [ "$rc" -eq 2 ] || { echo "FAIL invalid argument $bad rc=$rc" >&2; exit 1; }
     passed=$((passed + 1))
 done
-printf 'PASS: %s B4.1 bounded cases\n' "$passed"
+# SIGTERM must clean immediately. SIGKILL cannot be trapped: the independent
+# timer must still kill the diagnostic subtree at the hard deadline.
+for signal in TERM KILL; do
+    rm -f "$tmp/childpid"
+    DEADLINE_FIXTURE=hung
+    export DEADLINE_FIXTURE
+    sh "$worker" watchdog-check-bounded 3 > "$tmp/signal.out" 2>&1 &
+    controller=$!
+    tries=0
+    while [ ! -s "$tmp/childpid" ] && [ "$tries" -lt 50 ]; do
+        tries=$((tries + 1))
+        sleep 0.1
+    done
+    [ -s "$tmp/childpid" ] || {
+        echo "FAIL signal_${signal}: child did not start" >&2; exit 1;
+    }
+    read -r child < "$tmp/childpid"
+    case "$child" in ''|*[!0-9]*) echo "FAIL signal_${signal}: invalid PID" >&2; exit 1 ;; esac
+    kill "-$signal" "$controller" 2>/dev/null || :
+    wait "$controller" 2>/dev/null || :
+    tries=0
+    while [ "$tries" -lt 55 ]; do
+        alive=0
+        if [ -r "/proc/$child/stat" ]; then
+            stat=$(cat "/proc/$child/stat")
+            case "$stat" in *') Z '*) ;; *) alive=1 ;; esac
+        fi
+        [ "$alive" -eq 0 ] && break
+        tries=$((tries + 1))
+        sleep 0.1
+    done
+    [ "$alive" -eq 0 ] || {
+        echo "FAIL signal_${signal}: child survived deadline" >&2; exit 1;
+    }
+    passed=$((passed + 1))
+    echo "PASS signal_${signal}_no_running_orphan"
+done
+printf 'PASS: %s B4 bounded cases\n' "$passed"
