@@ -169,7 +169,7 @@ TEST_LOCAL_CHANGED=TRANSITION
 check local_change 'local=TRANSITION pid=none wan=UNKNOWN wan_source=changed_during_sample' MAINTENANCE
 TEST_LOCAL_CHANGED=
 TEST_IFACE_CHANGED=awg0_3
-check concurrent_failover 'local=TRANSITION pid=none wan=UNKNOWN wan_source=changed_during_sample vpn=UNKNOWN vpn_source=changed_during_sample' MAINTENANCE
+check concurrent_failover 'local=TRANSITION pid=none wan=UNKNOWN wan_source=changed_during_sample wan_link=UP vpn=UNKNOWN vpn_source=changed_during_sample' MAINTENANCE
 TEST_IFACE_CHANGED=
 
 : > "$TEST_FORBIDDEN_LOG"
