@@ -1188,7 +1188,7 @@ watchdog_check_bounded() (
         count=0
         while [ ! -f "$2/armed" ] && [ "$count" -lt 30 ]; do
             count=$((count + 1))
-            sleep 0.1
+            sleep 0.1 2>/dev/null || sleep 1
         done
         [ -f "$2/armed" ] || exit 2
         sh "$1" watchdog-check > "$2/result" 2>&1
@@ -1198,7 +1198,7 @@ watchdog_check_bounded() (
     tries=0
     while [ ! -s "$WATCH_BOUND_DIR/pid" ] && [ "$tries" -lt 30 ]; do
         tries=$((tries + 1))
-        sleep 0.1
+        sleep 0.1 2>/dev/null || sleep 1
     done
     if [ ! -s "$WATCH_BOUND_DIR/pid" ]; then
         printf 'WATCHDOG state=UNKNOWN reason=probe_start_unverified\n'; exit 2
@@ -1233,7 +1233,7 @@ watchdog_check_bounded() (
     # PID/PGID/SID verified and independent timer armed.
     : > "$WATCH_BOUND_DIR/armed"
     while [ ! -f "$WATCH_BOUND_DIR/rc" ] && [ ! -f "$WATCH_BOUND_DIR/expired" ]; do
-        sleep 0.1
+        sleep 0.1 2>/dev/null || sleep 1
     done
     if [ -f "$WATCH_BOUND_DIR/expired" ]; then
         wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
