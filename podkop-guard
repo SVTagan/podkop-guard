@@ -1282,7 +1282,7 @@ watchdog_evidence() {
     local mode local_output local_rc local_state local_pid payload
     local wan wan_source wan_json wan_up wan_pending wan_device carrier carrier_file
     local wan_checker wan_output wan_rc wan_result wan_matches
-    local vpn vpn_source iface vpn_checker vpn_output vpn_rc
+    local vpn vpn_source iface configured_iface vpn_checker vpn_output vpn_rc
     local doh check_script conn_type final_local final_rc final_iface final_conn
     mode="${1:-}"
     [ "$#" -le 1 ] || { err "usage: watchdog-evidence [--live]"; return 2; }
@@ -1372,6 +1372,7 @@ watchdog_evidence() {
     else
         conn_type=
     fi
+    configured_iface=$iface
     if [ "$mode" = --live ] && [ "$conn_type" = vpn ] && [ "$wan" != DOWN ]; then
         # Only the active configured interface, not the entire VPN pool.
         # Never change VPN selection, quarantine or Failover state.
@@ -1407,7 +1408,7 @@ watchdog_evidence() {
         final_iface=$(uci -q get podkop.main.interface 2>/dev/null)
         if [ "$final_local:$final_rc" != "$local_output:$local_rc" ] ||
            [ "$final_conn" != "$conn_type" ] ||
-           [ "$final_iface" != "$iface" ]; then
+           [ "$final_iface" != "$configured_iface" ]; then
             local_state=TRANSITION
             local_pid=none
             vpn=UNKNOWN
