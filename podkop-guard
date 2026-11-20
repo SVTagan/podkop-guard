@@ -1511,6 +1511,180 @@ watchdog_procd_snapshot() {
     printf '%s\n' "$parsed"
 }
 
+# Stage B2: procd event stream + independent snapshot reconciliation.
+# Manual CLI only; NEVER triggers service, UCI, network, or recovery changes.
+# The event stream has no replay: history is INCOMPLETE after any reconnect.
+watchdog_procd_bus_identity() {
+    local id pids pid start
+    if [ -n "${PODKOP_GUARD_PROCD_BUS_FILE:-}" ]; then
+        [ -r "$PODKOP_GUARD_PROCD_BUS_FILE" ] || return 1
+        IFS= read -r id < "$PODKOP_GUARD_PROCD_BUS_FILE" || [ -n "$id" ] || return 1
+        case "$id" in ''|DOWN|*[!a-zA-Z0-9_.:-]*) return 1 ;; esac
+        WATCH_PROCD_BUS_ID=$id
+        return 0
+    fi
+    command -v pidof >/dev/null 2>&1 || return 1
+    pids=$(pidof ubusd 2>/dev/null) || return 1
+    set -- $pids
+    pid="${1:-}"
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$pid/stat" ] || return 1
+    start=$(awk '{sub(/^.*\) /, ""); print $20}' "/proc/$pid/stat" 2>/dev/null) || return 1
+    case "$start" in ''|*[!0-9]*) return 1 ;; esac
+    WATCH_PROCD_BUS_ID="$pid:$start"
+}
+
+watchdog_procd_stop_subscriber() {
+    if [ -n "$WATCH_PROCD_SUB_PID" ]; then
+        kill -TERM "$WATCH_PROCD_SUB_PID" 2>/dev/null || :
+        kill -KILL "$WATCH_PROCD_SUB_PID" 2>/dev/null || :
+        wait "$WATCH_PROCD_SUB_PID" 2>/dev/null || :
+        WATCH_PROCD_SUB_PID=
+    fi
+}
+
+watchdog_procd_cleanup() {
+    watchdog_procd_stop_subscriber
+    exec 3>&- 2>/dev/null || :
+    if [ -n "$WATCH_PROCD_DIR" ]; then
+        rm -f "$WATCH_PROCD_DIR/events"
+        rmdir "$WATCH_PROCD_DIR" 2>/dev/null || :
+    fi
+    WATCH_PROCD_DIR=
+}
+
+watchdog_procd_reset_fifo() {
+    exec 3>&- 2>/dev/null || :
+    rm -f "$WATCH_PROCD_DIR/events"
+    mkfifo "$WATCH_PROCD_DIR/events" || return 1
+    exec 3<>"$WATCH_PROCD_DIR/events" || return 1
+    rm -f "$WATCH_PROCD_DIR/events"
+}
+
+watchdog_procd_subscriber_alive() {
+    [ -n "$WATCH_PROCD_SUB_PID" ] || return 1
+    kill -0 "$WATCH_PROCD_SUB_PID" 2>/dev/null || return 1
+    if [ -r "/proc/$WATCH_PROCD_SUB_PID/status" ] &&
+        grep -q '^State:[[:space:]]*Z' "/proc/$WATCH_PROCD_SUB_PID/status"; then
+        return 1
+    fi
+}
+
+watchdog_procd_monitor() {
+    local cycles interval changes_only mode sample bus_id old_bus sub_state
+    local event decoded event_state diagnosis snap snapshot pid old_snapshot
+    local resets attempts last_view view reason seen_event
+    [ "$#" -le 2 ] || { err "usage: watchdog-procd-monitor [cycles] [interval]"; return 2; }
+    cycles="${1:-6}"
+    interval="${2:-5}"
+    watch_monitor_number "$cycles" && watch_monitor_number "$interval" || return 2
+    if [ "$cycles" -eq 0 ]; then
+        [ "${PODKOP_GUARD_PROCD_UNBOUNDED:-0}" = 1 ] || return 2
+        mode=continuous
+    else
+        [ "$cycles" -ge 1 ] && [ "$cycles" -le 30 ] || return 2
+        mode=bounded
+    fi
+    [ "$interval" -ge 1 ] && [ "$interval" -le 30 ] || return 2
+    changes_only="${PODKOP_GUARD_PROCD_CHANGES_ONLY:-0}"
+    case "$changes_only" in 0|1) ;; *) return 2 ;; esac
+    for tool in ubus jq mktemp mkfifo pidof awk; do
+        command -v "$tool" >/dev/null 2>&1 || { err "missing procd monitor tool: $tool"; return 2; }
+    done
+    WATCH_PROCD_DIR=$(mktemp -d "${PODKOP_GUARD_PROCD_TMP_DIR:-/tmp}/podkop-guard-procd.XXXXXX") || return 2
+    WATCH_PROCD_SUB_PID=
+    WATCH_PROCD_STOP=0
+    trap 'WATCH_PROCD_STOP=1' TERM INT
+    trap 'watchdog_procd_cleanup' EXIT
+    watchdog_procd_reset_fifo || return 2
+    sample=0
+    attempts=0
+    resets=0
+    old_bus=
+    old_snapshot=
+    last_view=
+    seen_event=0
+    printf 'PROCD_MONITOR mode=%s cycles=%s interval=%ss history=INCOMPLETE action=none\n' "$mode" "$cycles" "$interval"
+    while [ "$WATCH_PROCD_STOP" -eq 0 ] &&
+        { [ "$cycles" -eq 0 ] || [ "$sample" -lt "$cycles" ]; }; do
+        sample=$((sample + 1))
+        bus_id=
+        if watchdog_procd_bus_identity; then bus_id=$WATCH_PROCD_BUS_ID; fi
+        sub_state=UNKNOWN
+        if [ -z "$bus_id" ]; then
+            if [ -n "$WATCH_PROCD_SUB_PID" ]; then
+                printf 'PROCD_MONITOR_EVENT subscription=LOST reason=ubusd_unavailable history=INCOMPLETE action=none\n'
+                watchdog_procd_stop_subscriber
+                old_bus=
+                resets=$((resets + 1))
+            fi
+            sleep "$interval"
+        else
+            if [ "$bus_id" != "$old_bus" ] || ! watchdog_procd_subscriber_alive; then
+                if [ -n "$WATCH_PROCD_SUB_PID" ]; then
+                    reason=ubusd_changed
+                    [ "$bus_id" = "$old_bus" ] && reason=subscriber_exit
+                    printf 'PROCD_MONITOR_EVENT subscription=RESET reason=%s history=INCOMPLETE action=none\n' "$reason"
+                    watchdog_procd_stop_subscriber
+                    resets=$((resets + 1))
+                fi
+                watchdog_procd_reset_fifo || break
+                ubus -S subscribe service >&3 2>/dev/null &
+                WATCH_PROCD_SUB_PID=$!
+                old_bus=$bus_id
+                attempts=$((attempts + 1))
+                printf 'PROCD_MONITOR_EVENT subscription=ATTEMPT number=%s history=INCOMPLETE action=none\n' "$attempts"
+            fi
+            sub_state=SUBSCRIBED_UNVERIFIED
+            event=
+            if IFS= read -r -t "$interval" event <&3; then
+                decoded=$(printf '%s\n' "$event" | watchdog_procd_event)
+                case "$decoded" in
+                    'PROCD_EVENT state=IGNORED '*) ;;
+                    *)
+                        event_state=${decoded#PROCD_EVENT state=}
+                        event_state=${event_state%% *}
+                        diagnosis=UNCONFIRMED
+                        if [ "$event_state" = CRASH_LOOP_REPORTED ] ||
+                            [ "$event_state" = RESPAWN_REPORTED ]; then
+                            if watch_maintenance_active; then diagnosis=MAINTENANCE; fi
+                        fi
+                        printf 'PROCD_MONITOR_EVENT event=%s diagnosis=%s history=INCOMPLETE action=none\n' "$event_state" "$diagnosis"
+                        seen_event=1
+                        ;;
+                esac
+            fi
+        fi
+        snapshot=$(watchdog_procd_snapshot)
+        snap=${snapshot#PROCD_SNAPSHOT state=}
+        snap=${snap%% *}
+        pid=none
+        case "$snapshot" in *' pid='*) pid=${snapshot#* pid=}; pid=${pid%% *} ;; esac
+        if [ -n "$old_snapshot" ] && [ "$old_snapshot" != "$snapshot" ] &&
+            [ "$seen_event" -eq 0 ]; then
+            printf 'PROCD_MONITOR_EVENT state_change=UNEXPLAINED snapshot=%s history=INCOMPLETE action=none\n' "$snap"
+        fi
+        old_snapshot=$snapshot
+        seen_event=0
+        view="$sub_state:$snap:$pid"
+        if [ "$changes_only" = 0 ] || [ "$view" != "$last_view" ]; then
+            printf 'PROCD_MONITOR sample=%s subscription=%s snapshot=%s pid=%s history=INCOMPLETE action=none\n' "$sample" "$sub_state" "$snap" "$pid"
+        fi
+        last_view=$view
+    done
+    trap - TERM INT EXIT
+    watchdog_procd_cleanup
+    printf 'PROCD_MONITOR_END completed=%s attempts=%s resets=%s action=none\n' "$sample" "$attempts" "$resets"
+}
+
+watchdog_procd_follow() {
+    [ "$#" -eq 0 ] || return 2
+    PODKOP_GUARD_PROCD_UNBOUNDED=1
+    PODKOP_GUARD_PROCD_CHANGES_ONLY=1
+    export PODKOP_GUARD_PROCD_UNBOUNDED PODKOP_GUARD_PROCD_CHANGES_ONLY
+    watchdog_procd_monitor 0 5
+}
+
 # Stage A: independent local diagnosis and external connectivity context.
 # Four inputs are externally supplied evidence, NOT implicit live probes.
 # A one-shot sample NEVER confirms a failure or authorizes recovery.
@@ -1597,6 +1771,8 @@ Commands:
   watchdog-evidence  Independent read-only WAN/VPN link metadata + local watchdog (no network probes)
   watchdog-procd-event  Decode a single procd event from stdin (no action)
   watchdog-procd-snapshot  Read current sing-box.main procd state (no action)
+  watchdog-procd-monitor [cycles] [interval]  Bounded procd subscription and reconciliation
+  watchdog-procd-follow  Explicit continuous read-only procd subscription (not enabled)
   daemon          Run the periodic validated refresh worker
   version         Print version
 
@@ -1621,6 +1797,8 @@ case "${1:-}" in
     watchdog-evidence) shift; watchdog_evidence "$@" ;;
     watchdog-procd-event) shift; watchdog_procd_event "$@" ;;
     watchdog-procd-snapshot) shift; watchdog_procd_snapshot "$@" ;;
+    watchdog-procd-monitor) shift; watchdog_procd_monitor "$@" ;;
+    watchdog-procd-follow) shift; watchdog_procd_follow "$@" ;;
     daemon) daemon_loop ;;
     version|--version|-V) echo "$VERSION" ;;
     help|--help|-h|'') usage ;;
