@@ -1160,8 +1160,14 @@ watch_bounded_wait_quiet() {
 # FD 7 MUST remain inherited by the session, diagnostic and its children.
 # Never unlock explicitly or unlink the lock inode, even after SIGKILL.
 watch_bounded_private_dir() {
-    [ -d "$1" ] && [ ! -L "$1" ] &&
-        [ "$(stat -c '%u:%a' "$1" 2>/dev/null)" = "$(id -u):700" ]
+    local listing uid
+    [ -d "$1" ] && [ ! -L "$1" ] || return 1
+    # Stock OpenWrt disables BusyBox stat. ls -ldn provides mode and
+    # numeric owner without requiring a new package. Fail closed.
+    listing=$(LC_ALL=C ls -ldn "$1" 2>/dev/null) || return 1
+    uid=$(id -u) || return 1
+    set -- $listing
+    [ "$#" -ge 4 ] && [ "$1" = drwx------ ] && [ "$3" = "$uid" ]
 }
 
 watch_bounded_slot_quiet() {
@@ -1232,7 +1238,8 @@ watchdog_check_bounded() (
     lock_root=/tmp/podkop-guard-probe.lock
     lock_file="$lock_root/lease"
     umask 077
-    command -v flock >/dev/null 2>&1 && command -v stat >/dev/null 2>&1 || {
+    command -v flock >/dev/null 2>&1 && command -v ls >/dev/null 2>&1 &&
+        command -v id >/dev/null 2>&1 || {
         printf 'WATCHDOG state=UNKNOWN reason=probe_barrier_unavailable\n'; exit 2
     }
     mkdir -m 700 "$lock_root" 2>/dev/null || :

@@ -166,7 +166,7 @@ if command -v mkfifo >/dev/null 2>&1 &&
    (IFS= read -r -t 1 wake 2>/dev/null <<'PG_TIMED_READ'
 ready
 PG_TIMED_READ
-    [ "$wake" = ready ]); then
+    [ "${wake:-}" = ready ]); then
     DEADLINE_EXPECT_FIFO=1
 fi
 export DEADLINE_EXPECT_FIFO
@@ -221,6 +221,21 @@ for bad in 0 2 121 abc; do
     [ "$rc" -eq 2 ] || { echo "FAIL invalid argument $bad rc=$rc" >&2; exit 1; }
     passed=$((passed + 1))
 done
+# The inherited lease can outlive the outer CLI and individual child.
+# Verify actual release via a NEW open file description. Do not unlock
+# the production lease or unlink its inode.
+test_lease_free() (
+    [ -f /tmp/podkop-guard-probe.lock/lease ] || exit 1
+    exec 7>>/tmp/podkop-guard-probe.lock/lease
+    flock -n 7 2>/dev/null
+)
+test_lease_inode() {
+    local listing
+    listing=$(LC_ALL=C ls -id /tmp/podkop-guard-probe.lock/lease) || return 1
+    set -- $listing
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$1"
+}
 # SIGTERM must clean immediately. SIGKILL cannot be trapped: the independent
 # timer must still kill the diagnostic subtree at the hard deadline.
 for signal in TERM KILL; do
@@ -235,7 +250,9 @@ for signal in TERM KILL; do
         sleep 0.1 2>/dev/null || sleep 1
     done
     [ -s "$tmp/childpid" ] || {
-        echo "FAIL signal_${signal}: child did not start" >&2; exit 1;
+        echo "FAIL signal_${signal}: child did not start" >&2
+        cat "$tmp/signal.out" >&2
+        exit 1;
     }
     read -r child < "$tmp/childpid"
     case "$child" in ''|*[!0-9]*) echo "FAIL signal_${signal}: invalid PID" >&2; exit 1 ;; esac
@@ -256,6 +273,17 @@ for signal in TERM KILL; do
     [ "$alive" -eq 0 ] || {
         echo "FAIL signal_${signal}: child survived deadline" >&2; exit 1;
     }
+    # Child exit alone does not imply the actual controller and all
+    # inherited FD holders have finished. Verify lease release within
+    # the SAME existing 15-second bound before the next scenario.
+    while ! test_lease_free; do
+        [ "$(( $(date +%s) - signal_start ))" -lt 15 ] || {
+            echo "FAIL signal_${signal}: lease not released" >&2
+            cat "$tmp/signal.out" >&2
+            exit 1
+        }
+        sleep 0.1 2>/dev/null || sleep 1
+    done
     signal_elapsed=$(( $(date +%s) - signal_start ))
     [ "$signal_elapsed" -lt 15 ] || {
         echo "FAIL signal_${signal} cleanup took ${signal_elapsed}s" >&2; exit 1;
@@ -531,7 +559,7 @@ for fixture in supervisors_stopped supervisors_lost; do
     # Both manual invocation and a NEW monitor must refuse to launch a
     # probe while the old group remains, even after its controller exited.
     rm -f "$tmp/blocked-dir"
-    lease_inode=$(stat -c '%i' /tmp/podkop-guard-probe.lock/lease)
+    lease_inode=$(test_lease_inode)
     set +e
     blocked=$(PATH="$tmp/actual-bin:$PATH" B5_PHASE=active B5_CASE_DIR="$tmp/blocked-dir" \
         DEADLINE_FIXTURE=healthy sh "$worker" watchdog-check-bounded 3)
@@ -577,7 +605,7 @@ for fixture in supervisors_stopped supervisors_lost; do
     verify "${fixture}_reentry_released" \
         'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' 0 healthy
     [ ! -e "$dir" ] && [ ! -e "$dir.abandoned" ] &&
-        [ "$(stat -c '%i' /tmp/podkop-guard-probe.lock/lease)" = "$lease_inode" ] || {
+        [ "$(test_lease_inode)" = "$lease_inode" ] || {
         echo "FAIL $fixture: stale slot or replaced lock inode" >&2; exit 1;
     }
 done
