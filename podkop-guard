@@ -1156,6 +1156,41 @@ watch_bounded_wait_quiet() {
     return 0
 }
 
+# One kernel-owned slot for every bounded probe (manual and resident).
+# FD 7 MUST remain inherited by the session, diagnostic and its children.
+# Never unlock explicitly or unlink the lock inode, even after SIGKILL.
+watch_bounded_private_dir() {
+    [ -d "$1" ] && [ ! -L "$1" ] &&
+        [ "$(stat -c '%u:%a' "$1" 2>/dev/null)" = "$(id -u):700" ]
+}
+
+watch_bounded_slot_quiet() {
+    local WATCH_BOUND_PID WATCH_BOUND_START
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    watch_bounded_private_dir "$1" && [ -r /proc/self/stat ] || return 1
+    # The lease is primary. Preserve a surviving session even if a child
+    # unexpectedly closed the inherited descriptor. Incomplete armed
+    # metadata is fail-closed, not permission to overwrite the slot.
+    if [ ! -e "$1/pid" ]; then
+        [ ! -e "$1/armed" ]; return
+    fi
+    [ -f "$1/pid" ] && [ ! -L "$1/pid" ] &&
+        read -r WATCH_BOUND_PID WATCH_BOUND_START < "$1/pid" &&
+        watch_monitor_number "$WATCH_BOUND_PID" &&
+        watch_monitor_number "$WATCH_BOUND_START" &&
+        [ "$WATCH_BOUND_PID" -gt 1 ] || return 1
+    ! watch_bounded_group_live
+}
+
+watch_bounded_remove_slot() {
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    watch_bounded_private_dir "$1" || return 1
+    rm -f "$1/pid" "$1/result" "$1/rc" "$1/expired" "$1/armed" \
+        "$1/notify" "$1/arm" "$1/cancel" "$1/finished" \
+        "$1/guard" "$1/rc.tmp" "$1/owner" || return 1
+    rmdir "$1"
+}
+
 watch_bounded_cleanup() {
     [ -n "$WATCH_BOUND_DIR" ] || return 0
     # Wake the session's own guard, never signal an externally chosen PID.
@@ -1179,7 +1214,7 @@ watch_bounded_cleanup() {
 }
 
 watchdog_check_bounded() (
-    local limit script rc wake until identity owner_stat owner_pid
+    local limit script rc wake until identity owner_stat owner_pid lock_root lock_file
     [ "$#" -le 1 ] || { err "usage: watchdog-check-bounded [seconds 3..120]"; exit 2; }
     limit="$1"
     [ -n "$limit" ] || limit="$PODKOP_GUARD_WATCH_MAX_SAMPLE"
@@ -1193,9 +1228,38 @@ watchdog_check_bounded() (
         command -v mktemp >/dev/null 2>&1 || {
         printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unavailable\n'; exit 2
     }
-    WATCH_BOUND_DIR=$(mktemp -d "/tmp/podkop-guard-probe.XXXXXX") || {
-        printf 'WATCHDOG state=UNKNOWN reason=probe_tmp_unavailable\n'; exit 2
+    # OpenWrt ships flock by default. Fail closed on custom builds without it.
+    lock_root=/tmp/podkop-guard-probe.lock
+    lock_file="$lock_root/lease"
+    umask 077
+    command -v flock >/dev/null 2>&1 && command -v stat >/dev/null 2>&1 || {
+        printf 'WATCHDOG state=UNKNOWN reason=probe_barrier_unavailable\n'; exit 2
     }
+    mkdir -m 700 "$lock_root" 2>/dev/null || :
+    watch_bounded_private_dir "$lock_root" && [ ! -L "$lock_file" ] &&
+        { [ ! -e "$lock_file" ] || [ -f "$lock_file" ]; } || {
+        printf 'WATCHDOG state=UNKNOWN reason=probe_barrier_unavailable\n'; exit 2
+    }
+    # No truncation/unlink. Opening a separate description is essential.
+    # A failed lock (busy or error) must never authorize another probe.
+    if ! { exec 7>>"$lock_file"; } 2>/dev/null; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_barrier_unavailable\n'; exit 2
+    fi
+    if ! flock -n 7 2>/dev/null; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_blocked\n'; exit 2
+    fi
+    WATCH_BOUND_DIR="$lock_root/active"
+    # Only after acquiring the lease may a new controller reclaim old
+    # private markers. No wildcard cleanup or growing per-probe directories.
+    if ! watch_bounded_slot_quiet "$WATCH_BOUND_DIR" ||
+       ! watch_bounded_slot_quiet "$WATCH_BOUND_DIR.abandoned"; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_blocked\n'; exit 2
+    fi
+    if ! watch_bounded_remove_slot "$WATCH_BOUND_DIR" ||
+       ! watch_bounded_remove_slot "$WATCH_BOUND_DIR.abandoned" ||
+       ! mkdir -m 700 "$WATCH_BOUND_DIR"; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_tmp_unavailable\n'; exit 2
+    fi
     WATCH_BOUND_PID=
     WATCH_BOUND_START=
     WATCH_BOUND_WAIT=poll
@@ -1221,6 +1285,8 @@ PG_TIMED_READ
     fi
     setsid sh -c '
         script=$1 dir=$2 mode=$3 limit=$4
+        # Confirm setsid/sh preserved the lease before any probe may run.
+        [ "$(readlink /proc/self/fd/7 2>/dev/null)" = "${dir%/*}/lease" ] || exit 2
         read -r owner_pid owner_birth < "$dir/owner" || exit 2
         case "$owner_pid:$owner_birth" in *[!0-9:]*|:*|*:) exit 2 ;; esac
         [ "$owner_pid" -gt 1 ] || exit 2
@@ -1385,7 +1451,9 @@ PG_TIMED_READ
     until=$((WATCH_BOUND_NOW + limit + 4))
     while [ ! -f "$WATCH_BOUND_DIR/finished" ]; do
         if ! watch_bounded_now || [ "$WATCH_BOUND_NOW" -ge "$until" ]; then
-            printf 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline\n'; exit 2
+            # The controller cannot verify termination. Inherited lease
+            # prevents further probes until all surviving holders exit.
+            printf 'WATCHDOG state=UNKNOWN reason=probe_uncontained\n'; exit 2
         fi
         if [ "$WATCH_BOUND_WAIT" = fifo ]; then
             IFS= read -r -t 1 wake <&8 || :
@@ -1394,7 +1462,10 @@ PG_TIMED_READ
         fi
     done
     if watch_bounded_wait_quiet; then WATCH_BOUND_QUIET=1; fi
-    if [ "$WATCH_BOUND_QUIET" != 1 ] || [ -f "$WATCH_BOUND_DIR/expired" ]; then
+    if [ "$WATCH_BOUND_QUIET" != 1 ]; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_uncontained\n'; exit 2
+    fi
+    if [ -f "$WATCH_BOUND_DIR/expired" ]; then
         printf 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline\n'; exit 2
     fi
     read -r rc < "$WATCH_BOUND_DIR/rc" || rc=invalid
@@ -1531,12 +1602,15 @@ watchdog_monitor() {
                 rest=${sample_output#* reason=}
                 sample_reason=${rest%% *}
                 case "$sample_reason" in
-                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|unsupported_dns_config|procd_returned|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable) ;;
+                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|unsupported_dns_config|procd_returned|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
                     *) sample_reason="" ;;
                 esac ;;
         esac
-        if [ "$late_probe" -eq 1 ] && [ "$sample_reason" != probe_hard_deadline ]; then
-            sample_reason=probe_late
+        if [ "$late_probe" -eq 1 ]; then
+            case "$sample_reason" in
+                probe_hard_deadline|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
+                *) sample_reason=probe_late ;;
+            esac
         fi
         if [ "$late_probe" -eq 1 ]; then
             # A delayed probe can be CPU starvation, not a sing-box hang.

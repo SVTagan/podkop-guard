@@ -122,9 +122,11 @@ case "$DEADLINE_FIXTURE" in
     invalid) exit 19 ;;
     empty) : ;;
     fd_isolation)
+        IFS= read -r stat < /proc/self/stat || exit 19
+        self=${stat%% *}
+        # IPC FDs are private, but the containment lease MUST be inherited.
+        [ "$(readlink "/proc/$self/fd/7" 2>/dev/null)" = /tmp/podkop-guard-probe.lock/lease ] || exit 19
         if [ "$DEADLINE_EXPECT_FIFO" = 1 ]; then
-            IFS= read -r stat < /proc/self/stat || exit 19
-            self=${stat%% *}
             rest=${stat##*) }
             set -- $rest
             parent=$2
@@ -508,7 +510,7 @@ for fixture in supervisors_stopped supervisors_lost; do
     # fixture and the still-present private dir prove the controller did
     # not wait for its diagnostic to exit or falsely report group cleanup.
     [ "$elapsed" -lt 18 ] && [ "$(cat "$tmp/fault.rc")" = 0 ] &&
-        grep -Fq 'state=UNKNOWN phase=UNKNOWN pid=none streak=0 reason=probe_hard_deadline' "$tmp/fault.out" &&
+        grep -Fq 'state=UNKNOWN phase=UNKNOWN pid=none streak=0 reason=probe_uncontained' "$tmp/fault.out" &&
         grep -Fxq 'MONITOR_END completed=1 confirmations=0 action=none' "$tmp/fault.out" &&
         [ -d "$dir" ] && b5_member_state "$mock" >/dev/null &&
         [ ! -e "$B5_FAULT_FALLBACK" ] || {
@@ -526,6 +528,31 @@ for fixture in supervisors_stopped supervisors_lost; do
     fi
     printf 'PASS %s_unknown_bounded elapsed_s=%s\n' "$fixture" "$elapsed"
     passed=$((passed + 1))
+    # Both manual invocation and a NEW monitor must refuse to launch a
+    # probe while the old group remains, even after its controller exited.
+    rm -f "$tmp/blocked-dir"
+    lease_inode=$(stat -c '%i' /tmp/podkop-guard-probe.lock/lease)
+    set +e
+    blocked=$(PATH="$tmp/actual-bin:$PATH" B5_PHASE=active B5_CASE_DIR="$tmp/blocked-dir" \
+        DEADLINE_FIXTURE=healthy sh "$worker" watchdog-check-bounded 3)
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] && [ "$blocked" = 'WATCHDOG state=UNKNOWN reason=probe_blocked' ] || {
+        echo "FAIL $fixture: manual containment rc=$rc out=$blocked" >&2; exit 1;
+    }
+    blocked=$(PATH="$tmp/actual-bin:$PATH" B5_PHASE=active B5_CASE_DIR="$tmp/blocked-dir" \
+        DEADLINE_FIXTURE=healthy PODKOP_GUARD_WATCH_MAX_SAMPLE=3 PODKOP_GUARD_WATCH_GRACE=0 \
+        sh "$worker" watchdog-monitor 3 0)
+    [ "$(printf '%s\n' "$blocked" | grep -c 'state=UNKNOWN phase=UNKNOWN pid=none streak=0 reason=probe_blocked')" -eq 3 ] &&
+        printf '%s\n' "$blocked" | grep -Fxq 'MONITOR_END completed=3 confirmations=0 action=none' || {
+        echo "FAIL $fixture: fresh monitor containment: $blocked" >&2; exit 1;
+    }
+    [ ! -e "$tmp/blocked-dir" ] && [ "$(cat "$dir/pid")" = "$session $session_birth" ] &&
+        b5_member_state "$mock" >/dev/null && [ ! -e "$B5_FAULT_FALLBACK" ] || {
+        echo "FAIL $fixture: probe launched while blocked" >&2; exit 1;
+    }
+    passed=$((passed + 1))
+    echo "PASS ${fixture}_reentry_blocked"
     : > "$B5_FAULT_RELEASE"
     released=$(date +%s)
     while b5_session_live; do
@@ -541,18 +568,18 @@ for fixture in supervisors_stopped supervisors_lost; do
         }
         echo 'PASS supervisors_resumed_cleanup'
     else
-        # The observed limitation is intentional: with both supervisors
-        # destroyed, Guard cannot clean up safely from outside the group.
-        # Only remove the recorded private fixture files after all its
-        # processes are gone. No wildcard/global /tmp sweep.
-        case "$dir" in /tmp/podkop-guard-probe.*) ;; *) exit 1 ;; esac
-        rm -f "$dir/pid" "$dir/result" "$dir/rc" "$dir/expired" "$dir/armed" \
-            "$dir/notify" "$dir/arm" "$dir/cancel" "$dir/finished" \
-            "$dir/guard" "$dir/rc.tmp" "$dir/owner"
-        rmdir "$dir"
+        # The TEST fixture terminated its own group, not the worker.
+        # Leave the old slot for production to reclaim on the next probe.
+        [ -d "$dir" ] || { echo 'FAIL lost supervisor slot unexpectedly absent' >&2; exit 1; }
         echo 'PASS supervisors_lost_test_only_cleanup'
     fi
     passed=$((passed + 1))
+    verify "${fixture}_reentry_released" \
+        'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' 0 healthy
+    [ ! -e "$dir" ] && [ ! -e "$dir.abandoned" ] &&
+        [ "$(stat -c '%i' /tmp/podkop-guard-probe.lock/lease)" = "$lease_inode" ] || {
+        echo "FAIL $fixture: stale slot or replaced lock inode" >&2; exit 1;
+    }
 done
 
 # Real CPU contention (not a guarantee of scheduler starvation).

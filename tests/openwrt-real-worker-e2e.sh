@@ -204,6 +204,10 @@ for marker in supervisors_stopped_unknown_bounded supervisors_resumed_cleanup su
     grep -Fq "PASS $marker" /tmp/pg-b4-deadline
 done
 echo PASS_VM_B5_SUPERVISOR_LOSS
+for marker in supervisors_stopped_reentry_blocked supervisors_lost_reentry_blocked supervisors_stopped_reentry_released supervisors_lost_reentry_released; do
+    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+done
+echo PASS_VM_B5_PROBE_CONTAINMENT
 echo PASS_VM_B4_ISOLATED_DEADLINE
 grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
 grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests
