@@ -30,6 +30,7 @@ jobs:
           sh -n tests/openwrt-multi-srs-e2e.sh
           sh -n tests/openwrt-real-worker-e2e.sh
           sh -n tests/openwrt-procd-lifecycle-e2e.sh
+          sh -n tests/openwrt-real-fakeip-e2e.sh
           python3 -m py_compile tests/openwrt-qemu.py
           sh -n tests/watchdog-init.sh
           sh -n tests/install-transaction.sh
