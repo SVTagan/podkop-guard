@@ -112,7 +112,8 @@ cat > "$tmp/box.json" <<'JSON'
       {"inbound": ["dns-in"], "action": "sniff"},
       {"protocol": "dns", "action": "hijack-dns"}
     ],
-    "final": "direct-out"
+    "final": "direct-out",
+    "default_domain_resolver": "unused-local"
   }
 }
 JSON
