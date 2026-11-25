@@ -19,13 +19,34 @@ case "$DEADLINE_FIXTURE" in
     fd_isolation)
         if [ "$DEADLINE_EXPECT_FIFO" = 1 ]; then
             IFS= read -r stat < /proc/self/stat || exit 19
+            self=${stat%% *}
             rest=${stat##*) }
             set -- $rest
             parent=$2
-            # The isolated session leader owns the wake channels, but the
-            # actual diagnostic subprocess must not inherit them.
-            [ -p "/proc/$parent/fd/8" ] && [ -p "/proc/$parent/fd/9" ] &&
-                [ ! -e /proc/self/fd/8 ] && [ ! -e /proc/self/fd/9 ] || exit 19
+            # ash may temporarily save redirections on FD 10/11 or other
+            # numbers while running a child. Identify the actual FIFO pair,
+            # not the original FD numbers. Check ALL child FD aliases.
+            notify=; arm=
+            for fd in /proc/"$parent"/fd/[0-9]*; do
+                target=$(readlink "$fd" 2>/dev/null) || continue
+                [ -p "$fd" ] || continue
+                case "$target" in
+                    /tmp/podkop-guard-probe.*/notify) notify=$target ;;
+                    /tmp/podkop-guard-probe.*/arm) arm=$target ;;
+                esac
+            done
+            [ -n "$notify" ] && [ -n "$arm" ] &&
+                [ "${notify%/notify}" = "${arm%/arm}" ] || {
+                printf 'FIFO parent pair not verified\n' > "$DEADLINE_CHILD_PID_FILE.fd_error"
+                exit 19
+            }
+            for fd in /proc/"$self"/fd/[0-9]*; do
+                target=$(readlink "$fd" 2>/dev/null) || continue
+                case "$target" in "$notify"|"$arm")
+                    printf 'Inherited FIFO: %s\n' "$fd" > "$DEADLINE_CHILD_PID_FILE.fd_error"
+                    exit 19 ;;
+                esac
+            done
         fi
         echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' ;;
 esac
@@ -52,7 +73,11 @@ verify() {
     rc=$?
     set -e
     [ "$rc" -eq "$rc_expected" ] && [ "$out" = "$expected" ] || {
-        echo "FAIL $name: rc=$rc expected=$rc_expected; out=$out expected=$expected" >&2; exit 1;
+        echo "FAIL $name: rc=$rc expected=$rc_expected; out=$out expected=$expected" >&2
+        if [ -s "$DEADLINE_CHILD_PID_FILE.fd_error" ]; then
+            cat "$DEADLINE_CHILD_PID_FILE.fd_error" >&2
+        fi
+        exit 1;
     }
     passed=$((passed + 1))
     printf 'PASS %s\n' "$name"
