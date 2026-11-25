@@ -33,10 +33,38 @@ fail() {
     done
     exit 1
 }
-# Do not replace a pre-existing service, even in the test guest.
+# Package post-install may register an empty service even when disabled:
+# rc.common opens/closes a procd service around start_service(), and
+# procd omits "instances" from an empty service dump. Log actual evidence.
+# Never replace a registered instance or a running process, even in QEMU.
+initial=$(ubus -t 3 call service list '{"name":"sing-box"}')
+printf 'VM_B5_INITIAL_SERVICE %s\n' "$initial"
+printf '%s\n' "$initial" | jq -e '
+    type == "object" and
+    ((keys - ["sing-box"]) | length == 0) and
+    (if has("sing-box") then
+        (.["sing-box"] | type == "object" and
+            ((has("instances") | not) or .instances == {}))
+     else true end)
+' >/dev/null || fail existing_service_instance
+if pidof sing-box >/dev/null 2>&1; then
+    fail existing_live_process
+fi
+if printf '%s\n' "$initial" | jq -e 'has("sing-box")' >/dev/null; then
+    [ "$(uci -q get sing-box.main.enabled)" = 0 ] ||
+        fail existing_service_not_disabled
+    # Only an empty, disabled package registration in this disposable
+    # guest can be removed. Do not change UCI or installed package files.
+    ubus -t 3 call service delete '{"name":"sing-box"}' >/dev/null ||
+        fail empty_service_delete
+    echo PASS_VM_B5_EMPTY_DISABLED_REGISTRATION
+fi
 initial=$(ubus -t 3 call service list '{"name":"sing-box"}')
 printf '%s\n' "$initial" | jq -e 'type == "object" and (has("sing-box") | not)' >/dev/null ||
-    fail existing_service
+    fail service_not_absent_after_preflight
+if pidof sing-box >/dev/null 2>&1; then
+    fail live_process_after_preflight
+fi
 cat > "$tmp/box.json" <<'JSON'
 {"log":{"disabled":true},"inbounds":[{"type":"socks","tag":"test-in","listen":"127.0.0.1","listen_port":17893}],"outbounds":[{"type":"direct","tag":"direct"}]}
 JSON
