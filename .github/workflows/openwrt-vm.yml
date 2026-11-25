@@ -63,7 +63,7 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             if [ "$VM_RELEASE" = 24.10.5 ] &&
                [ "$rc" -eq 2 ] &&
-               [ "$(cat gzip.log)" = 'gzip: openwrt.img.gz: decompression OK, trailing garbage ignored' ]; then
+               [ "$(sed '/^[[:space:]]*$/d' gzip.log)" = 'gzip: openwrt.img.gz: decompression OK, trailing garbage ignored' ]; then
               echo 'PASS_KNOWN_OPENWRT_GZIP_METADATA_WARNING'
             else
               exit "$rc"
