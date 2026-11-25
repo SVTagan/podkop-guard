@@ -121,6 +121,16 @@ case "$DEADLINE_FIXTURE" in
         wait ;;
     invalid) exit 19 ;;
     empty) : ;;
+    gate)
+        IFS= read -r stat < /proc/self/stat || exit 19
+        self=${stat%% *}
+        : > "$B5_GATE_DIR/launched.$self"
+        tries=0
+        while [ ! -e "$B5_GATE_DIR/release" ]; do
+            [ "$tries" -lt 10 ] || exit 19
+            tries=$((tries + 1)); sleep 1
+        done
+        echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' ;;
     fd_isolation)
         IFS= read -r stat < /proc/self/stat || exit 19
         self=${stat%% *}
@@ -642,4 +652,177 @@ read -r dir < "$tmp/actual-dir"
 }
 passed=$((passed + 1))
 printf 'PASS cpu_contention_unknown_cleanup elapsed_s=%s\n' "$elapsed"
+
+# B5.3a: exercise the remaining lease/metadata boundaries in the same
+# disposable CI/VM environment. No signals to actual service processes.
+slot=/tmp/podkop-guard-probe.lock/active
+[ ! -e "$slot" ] && [ ! -e "$slot.abandoned" ] && test_lease_free || {
+    echo 'FAIL containment precondition: previous slot/lease still active' >&2; exit 1;
+}
+original_inode=$(test_lease_inode)
+export B5_GATE_DIR="$tmp/gate"
+mkdir "$B5_GATE_DIR"
+# The missing-command PATH must actually hide flock. A setsid wrapper
+# records any attempted startup, which must not happen on either failure.
+mkdir "$tmp/no-flock" "$tmp/error-flock"
+ln -s "$(command -v mktemp)" "$tmp/no-flock/mktemp"
+cat > "$tmp/no-flock/setsid" <<'SH'
+#!/bin/sh
+: > "$B5_GATE_DIR/unexpected-start"
+exit 19
+SH
+chmod +x "$tmp/no-flock/setsid"
+cp "$tmp/no-flock/setsid" "$tmp/error-flock/setsid"
+cat > "$tmp/error-flock/flock" <<'SH'
+#!/bin/sh
+: > "$B5_GATE_DIR/flock-called"
+exit 19
+SH
+chmod +x "$tmp/error-flock/flock"
+shell=$(command -v sh)
+if PATH="$tmp/no-flock" "$shell" -c 'command -v flock >/dev/null 2>&1'; then
+    echo 'FAIL missing-flock fixture did not hide flock' >&2; exit 1
+fi
+set +e
+out=$(PATH="$tmp/no-flock" DEADLINE_FIXTURE=gate "$shell" "$worker" watchdog-check-bounded 3)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] && [ "$out" = 'WATCHDOG state=UNKNOWN reason=probe_barrier_unavailable' ] &&
+    [ ! -e "$B5_GATE_DIR/unexpected-start" ] && [ ! -e "$slot" ] || {
+    echo "FAIL flock_missing rc=$rc out=$out" >&2; exit 1;
+}
+passed=$((passed + 1)); echo 'PASS flock_missing_no_start'
+set +e
+out=$(PATH="$tmp/error-flock:$PATH" DEADLINE_FIXTURE=gate "$shell" "$worker" watchdog-check-bounded 3)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] && [ "$out" = 'WATCHDOG state=UNKNOWN reason=probe_blocked' ] &&
+    [ -e "$B5_GATE_DIR/flock-called" ] && [ ! -e "$B5_GATE_DIR/unexpected-start" ] &&
+    [ ! -e "$slot" ] || {
+    echo "FAIL flock_error rc=$rc out=$out" >&2; exit 1;
+}
+passed=$((passed + 1)); echo 'PASS flock_error_no_start'
+
+# Missing/malformed metadata with armed present must stay blocked. The
+# harness creates and removes only its own fixtures while holding a lease.
+for shape in absent malformed; do
+    (
+        exec 7>>/tmp/podkop-guard-probe.lock/lease
+        flock -n 7
+        mkdir -m 700 "$slot"
+        : > "$slot/armed"
+        if [ "$shape" = malformed ]; then printf 'not-a-pid\n' > "$slot/pid"; fi
+    )
+    verify "armed_${shape}_blocked" 'WATCHDOG state=UNKNOWN reason=probe_blocked' 2 gate
+    [ -f "$slot/armed" ] || { echo 'FAIL armed metadata overwritten' >&2; exit 1; }
+    if [ "$shape" = malformed ]; then
+        [ "$(cat "$slot/pid")" = not-a-pid ] || exit 1
+    fi
+    (
+        exec 7>>/tmp/podkop-guard-probe.lock/lease
+        flock -n 7
+        rm -f "$slot/armed" "$slot/pid"
+        rmdir "$slot"
+    )
+done
+
+# Simulate a real surviving session with no inherited lease. Do not
+# forcibly recycle a PID or signal the session. The bounded test session
+# exits on release or after 12 seconds on its own.
+setsid sh -c '
+    IFS= read -r stat < /proc/self/stat || exit 19
+    pid=${stat%% *}; rest=${stat##*) }; set -- "$1" $rest
+    [ "$4" = "$pid" ] && [ "$5" = "$pid" ] || exit 19
+    [ ! -e /proc/self/fd/7 ] || exit 19
+    printf "%s %s\n" "$pid" "${21}" > "$1/session"
+    n=0
+    while [ ! -e "$1/release" ] && [ "$n" -lt 12 ]; do
+        n=$((n + 1)); sleep 1
+    done
+' fixture "$B5_GATE_DIR" 7>&- > "$tmp/no-lease.log" 2>&1 &
+no_lease_launcher=$!
+started=$(date +%s)
+while [ ! -s "$B5_GATE_DIR/session" ]; do
+    [ "$(( $(date +%s) - started ))" -lt 5 ] || {
+        echo 'FAIL no-lease session startup' >&2; cat "$tmp/no-lease.log" >&2; exit 1;
+    }
+    sleep 0.1 2>/dev/null || sleep 1
+done
+read -r session session_birth < "$B5_GATE_DIR/session"
+(
+    exec 7>>/tmp/podkop-guard-probe.lock/lease
+    flock -n 7
+    mkdir -m 700 "$slot"
+    printf '%s %s\n' "$session" "$session_birth" > "$slot/pid"
+    : > "$slot/armed"
+)
+test_lease_free && b5_session_live || { echo 'FAIL no-lease precondition' >&2; exit 1; }
+verify live_session_without_lease_blocked 'WATCHDOG state=UNKNOWN reason=probe_blocked' 2 gate
+[ "$(cat "$slot/pid")" = "$session $session_birth" ] && b5_session_live || exit 1
+: > "$B5_GATE_DIR/release"
+wait "$no_lease_launcher" 2>/dev/null || :
+started=$(date +%s)
+while b5_session_live; do
+    [ "$(( $(date +%s) - started ))" -lt 5 ] || exit 1
+    sleep 0.1 2>/dev/null || sleep 1
+done
+verify no_lease_session_reclaimed 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' 0 healthy
+[ ! -e "$slot" ] && [ "$(test_lease_inode)" = "$original_inode" ] || exit 1
+rm -f "$B5_GATE_DIR/release" "$B5_GATE_DIR/session"
+# No rejected invocation above was permitted to reach the diagnostic.
+set -- "$B5_GATE_DIR"/launched.*
+[ "$#" -eq 1 ] && [ ! -e "$1" ] || { echo 'FAIL rejected probe launched' >&2; exit 1; }
+
+# Concurrent startup, not merely repeated attempts after the first
+# controller exits: four independent controllers race for one lease.
+for n in 1 2 3 4; do
+    (
+        while [ ! -e "$B5_GATE_DIR/start" ]; do sleep 0.1 2>/dev/null || sleep 1; done
+        set +e
+        DEADLINE_FIXTURE=gate sh "$worker" watchdog-check-bounded 15 > "$B5_GATE_DIR/out.$n" 2>&1
+        rc=$?
+        printf '%s\n' "$rc" > "$B5_GATE_DIR/rc.$n"
+    ) &
+done
+: > "$B5_GATE_DIR/start"
+started=$(date +%s)
+while :; do
+    done_count=0
+    for n in 1 2 3 4; do
+        if [ -s "$B5_GATE_DIR/rc.$n" ]; then done_count=$((done_count + 1)); fi
+    done
+    set -- "$B5_GATE_DIR"/launched.*
+    if [ "$done_count" -eq 3 ] && [ "$#" -eq 1 ] && [ -e "$1" ]; then break; fi
+    [ "$(( $(date +%s) - started ))" -lt 8 ] || {
+        : > "$B5_GATE_DIR/release"
+        echo 'FAIL concurrent startup: did not observe one winner and three blocked' >&2
+        cat "$B5_GATE_DIR"/out.* >&2; exit 1
+    }
+    sleep 0.1 2>/dev/null || sleep 1
+done
+for n in 1 2 3 4; do
+    if [ -s "$B5_GATE_DIR/rc.$n" ]; then
+        [ "$(cat "$B5_GATE_DIR/rc.$n")" = 2 ] &&
+            grep -Fxq 'WATCHDOG state=UNKNOWN reason=probe_blocked' "$B5_GATE_DIR/out.$n" || exit 1
+    fi
+done
+: > "$B5_GATE_DIR/release"
+wait
+healthy_count=0; blocked_count=0
+for n in 1 2 3 4; do
+    case "$(cat "$B5_GATE_DIR/rc.$n")" in
+        0) grep -Fxq 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' "$B5_GATE_DIR/out.$n"
+           healthy_count=$((healthy_count + 1)) ;;
+        2) grep -Fxq 'WATCHDOG state=UNKNOWN reason=probe_blocked' "$B5_GATE_DIR/out.$n"
+           blocked_count=$((blocked_count + 1)) ;;
+        *) cat "$B5_GATE_DIR/out.$n" >&2; exit 1 ;;
+    esac
+done
+set -- "$B5_GATE_DIR"/launched.*
+[ "$healthy_count" -eq 1 ] && [ "$blocked_count" -eq 3 ] &&
+    [ "$#" -eq 1 ] && [ -e "$1" ] && test_lease_free &&
+    [ ! -e "$slot" ] && [ "$(test_lease_inode)" = "$original_inode" ] || {
+    echo 'FAIL concurrent startup final assertions' >&2; exit 1;
+}
+passed=$((passed + 1)); echo 'PASS concurrent_start_single_winner'
 printf 'PASS: %s B4 bounded cases\n' "$passed"

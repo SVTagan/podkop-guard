@@ -222,6 +222,10 @@ for marker in supervisors_stopped_reentry_blocked supervisors_lost_reentry_block
     grep -Fq "PASS $marker" /tmp/pg-b4-deadline
 done
 echo PASS_VM_B5_PROBE_CONTAINMENT
+for marker in flock_missing_no_start flock_error_no_start armed_absent_blocked armed_malformed_blocked live_session_without_lease_blocked no_lease_session_reclaimed concurrent_start_single_winner; do
+    grep -Fxq "PASS $marker" /tmp/pg-b4-deadline
+done
+echo PASS_VM_B5_CONTAINMENT_EDGE_CASES
 echo PASS_VM_B4_ISOLATED_DEADLINE
 grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
 grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests
