@@ -14,6 +14,10 @@ monitor=
 monitor_birth=
 subscriber=
 subscriber_birth=
+maint_dir=
+maint_pid=
+maint_birth=
+maint_link=0
 # Return live state and starttime; refuse malformed/dead proc records.
 proc_identity() (
     case "$1" in ''|*[!0-9]*) exit 1 ;; esac
@@ -68,6 +72,21 @@ stop_events() {
     subscriber_birth=
 }
 cleanup() {
+    # Release only the finite shell fixture we created; never signal a
+    # marker PID. Keep its gate alive until it has had time to exit.
+    if [ -n "$maint_dir" ]; then
+        : > "$maint_dir/release"
+        n=0
+        while [ -n "$maint_pid" ] && [ "$n" -lt 4 ]; do
+            id=$(proc_identity "$maint_pid" || :)
+            [ "${id#* }" = "$maint_birth" ] || break
+            n=$((n + 1)); sleep 1
+        done
+    fi
+    if [ "$maint_link" = 1 ] &&
+       [ "$(readlink /usr/bin/podkop 2>/dev/null)" = "$tmp/podkop-fixture" ]; then
+        rm -f /usr/bin/podkop
+    fi
     stop_events
     if [ -n "$monitor" ] && [ -n "$monitor_birth" ]; then
         id=$(proc_identity "$monitor" || :)
@@ -89,7 +108,7 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fail() {
     echo "FAIL_VM_B6_FAKEIP $*" >&2
-    for f in ready.log monitor.log recovered.log respawn-monitor.log notifications.log respawn-check.log exhausted.log manual-stop.log; do
+    for f in ready.log monitor.log recovered.log respawn-monitor.log notifications.log respawn-check.log exhausted.log manual-stop.log maintenance.log; do
         if [ -f "$tmp/$f" ]; then cat "$tmp/$f" >&2; fi
     done
     exit 1
@@ -464,3 +483,202 @@ sha256sum /etc/podkop-guard/lkg-marker /etc/podkop-guard/lkg.srs \
     /etc/podkop-guard/lkg-subnets.lst > "$tmp/lkg.after"
 cmp -s "$tmp/lkg.before" "$tmp/lkg.after" || fail respawn_lkg_changed
 echo PASS_VM_B6_REAL_RESPAWN_LIFECYCLE
+
+# B6.1b.3: reproduce the pinned Podkop 0.7.24 shell invocation shapes
+# on real BusyBox ash. The body is deliberately inert and finite.
+# Do not run the actual Podkop script, modify cron/UCI or send a signal
+# to a PID from a marker. The real sing-box and real DNS remain healthy.
+assert_absent || fail maintenance_preexisting_box
+[ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ] ||
+    fail maintenance_preexisting_podkop
+[ ! -e /var/run/podkop_list_update.pid ] &&
+    [ ! -L /var/run/podkop_list_update.pid ] || fail maintenance_preexisting_marker
+owned=1
+ubus -t 3 call service set "$service" >/dev/null
+await_running none || fail maintenance_initial_health
+maint_box=$box
+maint_box_birth=$box_birth
+export PODKOP_GUARD_WATCH_LIST_PID_FILE="$tmp/maintenance-marker"
+# Use the real /proc and the normal executable path recognized by the
+# worker. The symlink is created only in the guarded disposable guest.
+cat > "$tmp/podkop-fixture" <<'SH'
+#!/bin/sh
+set -eu
+[ -n "${PG_MAINT_CASE_DIR:-}" ] && [ -d "$PG_MAINT_CASE_DIR" ]
+list_update() {
+    : > "$PG_MAINT_CASE_DIR/ready"
+    n=0
+    while [ ! -e "$PG_MAINT_CASE_DIR/release" ] && [ "$n" -lt 24 ]; do
+        n=$((n + 1)); sleep 1
+    done
+}
+case "$1" in
+    start|reload)
+        # Match upstream start_main: fork a function and record $!.
+        list_update &
+        printf '%s\n' "$!" > "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
+        ;;
+    list_update|stop|restart|list_update_extra|start_extra|unrelated)
+        # Match separate CLI invocation or a deliberately similar name.
+        list_update ;;
+    *) exit 19 ;;
+esac
+SH
+chmod 700 "$tmp/podkop-fixture"
+ln -s "$tmp/podkop-fixture" /usr/bin/podkop
+maint_link=1
+begin_maintenance() {
+    local mode kind attempt id cmd stat rest
+    mode=$1; kind=$2
+    [ -z "$maint_dir" ] || fail overlapping_fixture
+    rm -f "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
+    maint_dir=$(mktemp -d "$tmp/maintenance.XXXXXX")
+    PG_MAINT_CASE_DIR="$maint_dir" /usr/bin/podkop "$mode" > "$maint_dir/child.log" 2>&1 &
+    maint_launcher=$!
+    if [ "$kind" = background ]; then
+        wait "$maint_launcher" || fail maintenance_parent
+        maint_launcher=
+        read -r maint_pid < "$PODKOP_GUARD_WATCH_LIST_PID_FILE" || fail maintenance_marker
+    else
+        maint_pid=$maint_launcher
+    fi
+    attempt=0
+    while [ ! -e "$maint_dir/ready" ]; do
+        [ "$attempt" -lt 5 ] || fail maintenance_not_ready
+        attempt=$((attempt + 1)); sleep 1
+    done
+    id=$(proc_identity "$maint_pid") || fail maintenance_identity
+    maint_birth=${id#* }
+    [ "$(readlink -f "/proc/$maint_pid/exe")" = "$(readlink -f /bin/busybox)" ] ||
+        fail maintenance_not_busybox
+    cmd=$(tr '\000' ' ' < "/proc/$maint_pid/cmdline")
+    # The full argument must be the actual mode, not the function name.
+    case "$cmd" in *"/usr/bin/podkop $mode ") ;; *) fail "unexpected_cmdline:$mode:$cmd" ;; esac
+    IFS= read -r stat < "/proc/$maint_pid/stat" || fail maintenance_stat
+    rest=${stat##*) }; set -- $rest
+    printf 'VM_B6_MAINT_PROCESS mode=%s kind=%s pid=%s birth=%s ppid=%s cmdline=%s\n' \
+        "$mode" "$kind" "$maint_pid" "$maint_birth" "$2" "$cmd"
+    if [ "$kind" = background ]; then
+        [ "$(cat "$PODKOP_GUARD_WATCH_LIST_PID_FILE")" = "$maint_pid" ] || fail marker_mismatch
+    else
+        [ ! -e "$PODKOP_GUARD_WATCH_LIST_PID_FILE" ] || fail unexpected_marker
+    fi
+}
+end_maintenance() {
+    local attempt
+    : > "$maint_dir/release"
+    if [ -n "$maint_launcher" ]; then
+        wait "$maint_launcher" || fail maintenance_child
+    fi
+    attempt=0
+    while ! old_gone "$maint_pid" "$maint_birth"; do
+        [ "$attempt" -lt 5 ] || fail maintenance_child_alive
+        attempt=$((attempt + 1)); sleep 1
+    done
+    maint_dir=
+    maint_pid=
+    maint_birth=
+    maint_launcher=
+}
+maintenance_probe() {
+    local label expected output rc
+    label=$1; expected=$2
+    rc=0
+    output=$(sh "$worker" watchdog-check-bounded 8) || rc=$?
+    printf 'VM_B6_MAINT_SAMPLE case=%s rc=%s %s\n' "$label" "$rc" "$output"
+    [ "$rc" -eq 0 ] || fail "maintenance_probe_rc:$label"
+    case "$expected:$output" in
+        'lifecycle:WATCHDOG state=TRANSITION reason=podkop_lifecycle '*) ;;
+        'list:WATCHDOG state=TRANSITION reason=list_update '*) ;;
+        'healthy:WATCHDOG state=HEALTHY_SAMPLED '*) ;;
+        *) fail "maintenance_probe_state:$label:$output" ;;
+    esac
+    our_box && [ "$box:$box_birth" = "$maint_box:$maint_box_birth" ] ||
+        fail maintenance_changed_box
+}
+
+# Parent returns, but forked list_update remains with cmdline "start"
+# or "reload". Check the stale marker remains harmless after child exit.
+begin_maintenance start background
+maintenance_probe background_start lifecycle
+# No marker: the global process scan still detects the actual child.
+mv "$PODKOP_GUARD_WATCH_LIST_PID_FILE" "$tmp/marker.saved"
+maintenance_probe background_start_without_marker lifecycle
+mv "$tmp/marker.saved" "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
+end_maintenance
+[ -s "$PODKOP_GUARD_WATCH_LIST_PID_FILE" ] || fail stale_marker_not_retained
+maintenance_probe stale_background_marker healthy
+echo PASS_VM_B6_BACKGROUND_LIST_UPDATE_EVIDENCE
+begin_maintenance reload background
+maintenance_probe background_reload lifecycle
+end_maintenance
+maintenance_probe stale_reload_marker healthy
+
+# Separate CLI, as used by cron and operators, with no PID marker.
+begin_maintenance list_update direct
+maintenance_probe standalone_list_update list
+# Grace is shortened ONLY for the fixture. Record the current absence
+# of a prolonged-maintenance limit; this is evidence, not a desired
+# permanent acceptance contract. No healthy baseline during maintenance.
+PODKOP_GUARD_WATCH_GRACE=1 sh "$worker" watchdog-monitor 4 1 > "$tmp/maintenance.log" 2>&1 ||
+    fail maintenance_monitor
+cat "$tmp/maintenance.log"
+for n in 1 2 3 4; do
+    grep -Fxq "MONITOR sample=$n/4 state=TRANSITION phase=TRANSITION pid=$box streak=0 reason=list_update" "$tmp/maintenance.log" ||
+        fail "maintenance_monitor_sample_$n"
+done
+grep -Fxq 'MONITOR_END completed=4 confirmations=0 action=none' "$tmp/maintenance.log" ||
+    fail maintenance_monitor_end
+echo PASS_VM_B6_PROLONGED_MAINTENANCE_EVIDENCE
+end_maintenance
+maintenance_probe after_list_update healthy
+echo PASS_VM_B6_STANDALONE_LIST_UPDATE_EVIDENCE
+
+# Actual process argument matching, without performing real lifecycle
+# operations. No UCI/network configuration is changed by the fixture.
+for mode in stop restart; do
+    begin_maintenance "$mode" direct
+    maintenance_probe "manual_$mode" lifecycle
+    end_maintenance
+done
+echo PASS_VM_B6_MANUAL_LIFECYCLE_EVIDENCE
+
+# Simulate a stale marker now referring to an unrelated live process.
+# Do not force kernel PID recycling. The marker alone must not suppress.
+begin_maintenance unrelated direct
+printf '%s\n' "$maint_pid" > "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
+maintenance_probe unrelated_live_marker healthy
+end_maintenance
+printf 'not-a-pid\n' > "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
+maintenance_probe malformed_marker healthy
+echo PASS_VM_B6_STALE_MARKER_EVIDENCE
+
+# Existing substring checks mistake these non-operations for maintenance.
+# Pin the observed limitation for B6.2; later replace these expectations
+# with strict argument matching, not with skipped assertions.
+begin_maintenance list_update_extra direct
+maintenance_probe list_update_prefix_collision list
+end_maintenance
+begin_maintenance start_extra direct
+maintenance_probe lifecycle_prefix_collision lifecycle
+end_maintenance
+echo PASS_VM_B6_CMDLINE_PREFIX_COLLISION_EVIDENCE
+rm -f "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
+maintenance_probe final_healthy healthy
+
+[ "$(readlink /usr/bin/podkop)" = "$tmp/podkop-fixture" ] ||
+    fail maintenance_link_changed
+rm -f /usr/bin/podkop
+maint_link=0
+[ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ] &&
+    [ ! -e /var/run/podkop_list_update.pid ] || fail maintenance_fixture_leak
+our_box || fail maintenance_cleanup_ownership
+ubus -t 3 call service delete '{"name":"sing-box"}' >/dev/null
+wait_absent && old_gone "$maint_box" "$maint_box_birth" || fail maintenance_cleanup
+owned=0
+[ ! -e /tmp/podkop-guard-probe.lock/active ] &&
+    [ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ] || fail maintenance_probe_slot_leak
+sha256sum /etc/podkop-guard/lkg-marker /etc/podkop-guard/lkg.srs \
+    /etc/podkop-guard/lkg-subnets.lst > "$tmp/lkg.after"
+cmp -s "$tmp/lkg.before" "$tmp/lkg.after" || fail maintenance_lkg_changed
+echo PASS_VM_B6_REAL_MAINTENANCE_EVIDENCE
