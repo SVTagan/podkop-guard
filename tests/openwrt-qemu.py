@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot real OpenWrt 25.12.x under QEMU and test apk and procd via serial.
+"""Boot pinned OpenWrt 24.10.5 or 25.12.6 and test opkg/apk and procd via serial.
 
 No interaction with a router, real UCI or public services; ephemeral QEMU only.
 """
@@ -9,7 +9,11 @@ import time
 
 import pexpect
 
-image = sys.argv[1]
+if len(sys.argv) != 3 or sys.argv[2] not in ("24.10.5", "25.12.6"):
+    raise SystemExit("usage: openwrt-qemu.py IMAGE {24.10.5|25.12.6}")
+image, release = sys.argv[1:]
+pkg = {"24.10.5": "opkg", "25.12.6": "apk"}[release]
+vm_env = f"PG_DISPOSABLE_VM=1 PG_VM_RELEASE={release}"
 child = pexpect.spawn(
     "qemu-system-x86_64",
     [
@@ -57,12 +61,15 @@ try:
             raise RuntimeError(f"VM command returned {rc}: {cmd}")
         return rc
 
-    run("grep -q '25.12.6' /etc/openwrt_release")
-    run("command -v apk && apk --version")
-    run("apk info -e procd")
-    run("apk info -e busybox")
+    run(f"grep -Fxq \"DISTRIB_RELEASE='{release}'\" /etc/openwrt_release")
+    run(f"command -v {pkg} && {pkg} --version")
+    for package in ("procd", "busybox"):
+        if pkg == "apk":
+            run(f"apk info -e {package}")
+        else:
+            run(f"opkg status {package} | grep -q '^Status: install .* installed$'")
     run("command -v ubus && command -v uci")
-    print("PASS: real OpenWrt 25.12.6 apk package database", flush=True)
+    print(f"PASS: real OpenWrt {release} {pkg} package database", flush=True)
 
     init_script = """#!/bin/sh /etc/rc.common
 START=98
@@ -93,7 +100,7 @@ start_service() {
     run("/etc/init.d/pg-vm-test stop")
     run("""! ubus call service list '{"name":"pg-vm-test"}' | grep -q '"first"'""")
     print("PASS: real procd stops both named instances", flush=True)
-    print("QEMU_25_12_PASS", flush=True)
+    print("QEMU_24_10_PASS" if pkg == "opkg" else "QEMU_25_12_PASS", flush=True)
 
     # A disposable guest is allowed to update its own /usr/bin and init.d.
     # The host machine and user's AX6000 have no connection to these files.
@@ -102,16 +109,16 @@ start_service() {
     run("test -r /mnt/pg-bundle/openwrt-installer-e2e.sh")
     run("test -r /mnt/pg-bundle/install.sh")
     run("test -r /mnt/pg-bundle/podkop-guard.init")
-    run("sh /mnt/pg-bundle/openwrt-installer-e2e.sh", timeout=240)
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-installer-e2e.sh", timeout=240)
     print("QEMU_INSTALLER_E2E_PASS", flush=True)
     # Real SRS fixture cache test runs before the worker procd smoke test,
     # while the previous fixture instance is stopped.
     run("test -r /mnt/pg-bundle/openwrt-multi-srs-e2e.sh")
-    run("sh /mnt/pg-bundle/openwrt-multi-srs-e2e.sh", timeout=240)
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-multi-srs-e2e.sh", timeout=240)
     print("QEMU_MULTI_SRS_CACHE_E2E_PASS", flush=True)
     run("test -r /mnt/pg-bundle/podkop-guard")
     run("test -r /mnt/pg-bundle/openwrt-real-worker-e2e.sh")
-    run("sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh", timeout=330)
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh", timeout=330)
     print("QEMU_REAL_WORKER_E2E_PASS", flush=True)
 finally:
     child.close(force=True)

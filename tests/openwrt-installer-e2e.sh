@@ -1,14 +1,11 @@
 #!/bin/sh
-# Executed only inside a disposable x86_64 OpenWrt 25.12.6 QEMU VM.
-# Real apk/procd, real installer, genuine candidate init. Podkop and worker
+# Executed only inside a disposable x86_64 OpenWrt QEMU VM.
+# Real opkg/apk and procd, real installer, genuine candidate init. Podkop and worker
 # are harmless local fixtures. NEVER run on a production router.
 set -eu
-grep -q "DISTRIB_RELEASE='25.12.6'" /etc/openwrt_release
-grep -q "DISTRIB_TARGET='x86/64'" /etc/openwrt_release
+. /mnt/pg-bundle/openwrt-vm-common.sh
 [ -r /mnt/pg-bundle/install.sh ]
 [ -r /mnt/pg-bundle/podkop-guard.init ]
-apk info -e procd >/dev/null
-apk info -e busybox >/dev/null
 test ! -e /etc/init.d/podkop-guard
 test ! -e /usr/bin/podkop-guard
 
@@ -20,19 +17,22 @@ exit 0
 SH
 chmod 0755 /etc/init.d/podkop
 
-# The VM's apk package database is real. Suppress external package downloads:
-# curl/jq are marked available by this narrow wrapper, not installed.
-cat > /tmp/pg-e2e/bin/apk <<'SH'
+# Use the real package DB except the two fixture dependencies curl/jq.
+# No package writes in transactional installer tests; later suites use
+# the actual packages. Forward all other reads to the real manager.
+cat > "/tmp/pg-e2e/bin/$PG_VM_PKG" <<'SH'
 #!/bin/sh
-if [ "$1" = info ] && [ "$2" = -e ]; then
-    case "$3" in
-        curl|jq) printf '%s\n' "$3"; exit 0 ;;
-    esac
-fi
-case "$1" in
-    add|update) echo 'UNEXPECTED apk write in isolated test' >&2; exit 25 ;;
+case "$PG_VM_PKG:$1" in
+    apk:info)
+        if [ "$2" = -e ]; then
+            case "$3" in curl|jq) printf '%s\n' "$3"; exit 0 ;; esac
+        fi ;;
+    opkg:status)
+        case "$2" in curl|jq) printf 'Package: %s\nStatus: install ok installed\n' "$2"; exit 0 ;; esac ;;
+    *:add|*:install|*:update)
+        echo 'UNEXPECTED package write in isolated test' >&2; exit 25 ;;
 esac
-exec /usr/bin/apk "$@"
+exec "$PG_VM_REAL_PKG" "$@"
 SH
 cat > /tmp/pg-e2e/bin/curl <<'SH'
 #!/bin/sh
@@ -132,7 +132,7 @@ echo PASS_VM_OLD_PROCD
 
 PODKOP_GUARD_PREFLIGHT_ONLY=1 \
     sh /mnt/pg-bundle/install.sh >/tmp/pg-e2e/preflight.log 2>&1
-grep -q 'PREFLIGHT_PASS.*existing=1 running=1 enabled=1' \
+grep -q "PREFLIGHT_PASS pkg_manager=$PG_VM_PKG .*existing=1 running=1 enabled=1" \
     /tmp/pg-e2e/preflight.log
 assert_old
 echo PASS_VM_PREFLIGHT

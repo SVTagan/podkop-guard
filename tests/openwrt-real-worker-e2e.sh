@@ -2,6 +2,7 @@
 # Actual podkop-guard 0.3.0-dev source under REAL procd in disposable QEMU.
 # No real Podkop/VPN routing. No network configuration changes.
 set -eu
+. /mnt/pg-bundle/openwrt-vm-common.sh
 
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
 [ -r /mnt/pg-bundle/podkop-guard ]
@@ -10,7 +11,7 @@ grep -q '^VERSION="0.3.0-dev"' /mnt/pg-bundle/podkop-guard
 
 # Give this disposable guest an outbound route through QEMU user-mode NAT.
 # Stock OpenWrt images often treat their only NIC as static LAN (192.168.1.1),
-# so a networkless boot test cannot reach official APK repositories.
+# so a networkless boot test cannot reach official package repositories.
 guest_if=br-lan
 ip link show "$guest_if" >/dev/null 2>&1 || guest_if=eth0
 ip link set "$guest_if" up
@@ -20,13 +21,13 @@ printf 'nameserver 10.0.2.3\n' > /tmp/resolv.conf
 printf 'nameserver 10.0.2.3\n' > /tmp/resolv.conf.d/resolv.conf.auto
 echo "VM_NAT_READY interface=$guest_if"
 
-# Use the real OpenWrt 25.12 APK database and install the real dependencies
-# instead of simulating 'apk info -e'. This is inside QEMU only.
-apk update
-apk add curl jq sing-box
+# Use the real release-specific package database and real dependencies.
+# Preserve the package checks of the original 25.12 test.
+vm_pkg_update
+vm_pkg_install curl jq sing-box
 
 for dep in curl jq sing-box; do
-    apk info -e "$dep" >/dev/null || {
+    vm_pkg_installed "$dep" || {
         echo "FAIL_REAL_DEP_MISSING $dep" >&2
         exit 1
     }
@@ -35,7 +36,10 @@ command -v curl
 command -v jq
 command -v sing-box
 sing-box version | head -n 1
-echo PASS_VM_REAL_APK_DEPENDENCIES
+case "$PG_VM_PKG" in
+    apk) echo PASS_VM_REAL_APK_DEPENDENCIES ;;
+    opkg) echo PASS_VM_REAL_OPKG_DEPENDENCIES ;;
+esac
 
 # Stop the earlier harmless fixture worker before replacing its source.
 # The init file remains the exact dev init from the checked-out branch.

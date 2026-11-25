@@ -1,4 +1,4 @@
-name: OpenWrt 25.12 QEMU verification
+name: OpenWrt QEMU verification (24.10 and 25.12)
 
 on:
   push:
@@ -6,6 +6,7 @@ on:
       - feature/watchdog-observe-only
     paths:
       - tests/openwrt-qemu.py
+      - tests/openwrt-vm-common.sh
       - tests/openwrt-installer-e2e.sh
       - tests/openwrt-real-worker-e2e.sh
       - tests/openwrt-procd-lifecycle-e2e.sh
@@ -23,31 +24,46 @@ permissions:
   contents: read
 
 jobs:
-  openwrt-25-12:
+  openwrt:
+    name: OpenWrt ${{ matrix.release }} QEMU (${{ matrix.pkg }})
     runs-on: ubuntu-latest
     timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: '24.10.5'
+            pkg: opkg
+            sha256: '5b854a7a2909a0b21887ba9be773b0964eb28fef81d6b8399d32a0f270a5d8ff'
+          - release: '25.12.6'
+            pkg: apk
+            sha256: 'f8538784d0288b4133a99ac2a68443e4922ffde6343e80df56a5882364b9d499'
     steps:
       - uses: actions/checkout@v6
       - name: Install isolated QEMU test dependencies
         run: |
           sudo apt-get -qq update
           sudo apt-get -qq install -y qemu-system-x86 python3-pexpect e2fsprogs
-      - name: Download official OpenWrt 25.12.6 (x86_64 BIOS ext4)
+      - name: Download official OpenWrt ${{ matrix.release }} (x86_64 BIOS ext4)
+        env:
+          VM_RELEASE: ${{ matrix.release }}
+          VM_SHA256: ${{ matrix.sha256 }}
         run: |
           set -eu
           curl -fL --retry 3 \
-            https://downloads.openwrt.org/releases/25.12.6/targets/x86/64/openwrt-25.12.6-x86-64-generic-ext4-combined.img.gz \
+            "https://downloads.openwrt.org/releases/$VM_RELEASE/targets/x86/64/openwrt-$VM_RELEASE-x86-64-generic-ext4-combined.img.gz" \
             -o openwrt.img.gz
-          printf 'f8538784d0288b4133a99ac2a68443e4922ffde6343e80df56a5882364b9d499  openwrt.img.gz\n' | sha256sum -c -
+          printf '%s  openwrt.img.gz\n' "$VM_SHA256" | sha256sum -c -
           gzip -d openwrt.img.gz
       - name: Create isolated read-only fixture disk
         run: |
           set -eu
           mkdir -p vm-input
-          cp install.sh podkop-guard podkop-guard.init vm-input/
+          cp install.sh podkop-guard podkop-guard.init tests/openwrt-vm-common.sh vm-input/
           cp tests/openwrt-installer-e2e.sh tests/openwrt-real-worker-e2e.sh tests/openwrt-multi-srs-e2e.sh vm-input/
           cp tests/watchdog-check.sh tests/watchdog-monitor.sh vm-input/
           cp tests/watchdog-deadline.sh tests/openwrt-procd-lifecycle-e2e.sh vm-input/
+          sh -n vm-input/openwrt-vm-common.sh
           sh -n vm-input/install.sh
           sh -n vm-input/podkop-guard
           sh -n vm-input/openwrt-installer-e2e.sh
@@ -76,7 +92,8 @@ jobs:
           done
           truncate -s 16M openwrt-test-bundle.img
           mkfs.ext4 -F -q -d vm-input openwrt-test-bundle.img
-      - name: Boot OpenWrt and verify real apk/procd/installer
-
+      - name: Boot OpenWrt and verify real ${{ matrix.pkg }}/procd/installer
+        env:
+          VM_RELEASE: ${{ matrix.release }}
         run: |
-          /usr/bin/python3 tests/openwrt-qemu.py openwrt.img
+          /usr/bin/python3 tests/openwrt-qemu.py openwrt.img "$VM_RELEASE"

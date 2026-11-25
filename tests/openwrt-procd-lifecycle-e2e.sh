@@ -2,10 +2,7 @@
 # B5.2c.2: real procd, real ubusd and a disposable sing-box instance.
 # DNS/nft/conntrack are controlled inputs, not a functional VPN test.
 set -eu
-[ "${PG_DISPOSABLE_VM:-}" = 1 ]
-grep -q '25.12.6' /etc/openwrt_release
-grep -Eq 'QEMU|Bochs' /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name
-grep -Eq ' /mnt/pg-bundle ext4 ro[, ]' /proc/mounts
+. /mnt/pg-bundle/openwrt-vm-common.sh
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
 worker=/usr/bin/podkop-guard
 tmp=$(mktemp -d /tmp/pg-lifecycle.XXXXXX)

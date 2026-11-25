@@ -1,9 +1,9 @@
 #!/bin/sh
-# Isolated OpenWrt 25.12.6 QEMU integration: REAL Community SRS, REAL sing-box
+# Isolated OpenWrt QEMU integration: REAL Community SRS, REAL sing-box
 # cache.db, REAL Guard refresh-test. No user router, Podkop or VPN is touched.
 set -eu
 
-grep -q "DISTRIB_RELEASE='25.12.6'" /etc/openwrt_release
+. /mnt/pg-bundle/openwrt-vm-common.sh
 [ -r /mnt/pg-bundle/srs/block.srs ] || { echo 'missing SRS fixtures' >&2; exit 1; }
 [ -r /mnt/pg-bundle/podkop-guard ]
 [ -r /mnt/pg-bundle/srs/geoblock.srs ]
@@ -22,17 +22,21 @@ printf 'nameserver 10.0.2.3\n' > /tmp/resolv.conf.d/resolv.conf.auto
 echo "VM_NAT_READY interface=$guest_if"
 
 # Real packages and real HTTP server; no mock programs in PATH.
-apk update >/tmp/pg-srs-install.log 2>&1 || {
-    echo 'FAIL: apk update inside QEMU' >&2
+vm_pkg_update >/tmp/pg-srs-install.log 2>&1 || {
+    echo "FAIL: $PG_VM_PKG update inside QEMU" >&2
     cat /tmp/pg-srs-install.log >&2
     exit 1
 }
-apk add curl jq sing-box uhttpd >>/tmp/pg-srs-install.log 2>&1 || {
+vm_pkg_install curl jq sing-box uhttpd >>/tmp/pg-srs-install.log 2>&1 || {
     echo 'FAIL: installing real VM-only tools' >&2
     cat /tmp/pg-srs-install.log >&2
     exit 1
 }
-for package in curl jq sing-box uhttpd; do apk info -e "$package" >/dev/null; done
+for package in curl jq sing-box uhttpd; do
+    vm_pkg_installed "$package"
+    vm_pkg_version "$package"
+done
+sing-box version | head -n 1
 echo PASS_REAL_MULTI_DEPENDENCIES
 
 TEST_DIR=/tmp/pg-srs-cache-e2e
