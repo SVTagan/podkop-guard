@@ -19,7 +19,7 @@ line=$(sed -n "${counter}p" "$MONITOR_TEST_FIXTURE")
 [ -n "$line" ] || exit 9
 oldifs=$IFS
 IFS='|'
-read -r state pid rc simulated_uptime <<EOF
+read -r state pid rc simulated_uptime reason <<EOF
 $line
 EOF
 IFS=$oldifs
@@ -45,6 +45,7 @@ if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
         suffix=' reason=loopback_unresponsive'
     fi
 fi
+if [ -n "$reason" ]; then suffix="$suffix reason=$reason"; fi
 printf 'WATCHDOG state=%s pid=%s mock=yes%s\n' "$state" "$pid" "$suffix"
 exit "$rc"
 SH
@@ -125,6 +126,32 @@ run_case wan_vpn_unknown 'phase=HEALTHY' 0 "$H" "$H" "$H"
 MONITOR_TEST_CONTROL_MODE=1
 export MONITOR_TEST_CONTROL_MODE
 run_case validated_loopback_suppression 'reason=loopback_unresponsive' 0 "$H" "$T" "$T" "$T"
+unset MONITOR_TEST_CONTROL_MODE
+# The same numeric PID after a gap is NOT a fresh healthy baseline.
+# Assert the final sample phase as well as zero confirmations. Three
+# consecutive timeouts would have confirmed against the old baseline.
+U_PROCD='UNKNOWN|none|2||procd_unavailable'
+X_MAINT='TRANSITION|101|0||list_update'
+run_case procd_gap_invalidates_baseline \
+    'sample=6/6 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T" "$U_PROCD" "$T" "$T" "$T"
+run_case unknown_gap_invalidates_baseline \
+    'sample=5/5 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$U" "$T" "$T" "$T"
+run_case missing_invalidates_baseline \
+    'sample=5/5 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$M" "$T" "$T" "$T"
+run_case maintenance_invalidates_baseline \
+    'sample=5/5 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$X_MAINT" "$T" "$T" "$T"
+run_case procd_gap_fresh_baseline_rearms \
+    'sample=6/6 state=SUSPECT_DNS_TIMEOUT phase=CONFIRMED pid=101 streak=3' 1 \
+    "$H" "$U_PROCD" "$H" "$T" "$T" "$T"
+MONITOR_TEST_CONTROL_MODE=1
+export MONITOR_TEST_CONTROL_MODE
+run_case procd_gap_discards_loopback \
+    'sample=3/3 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$U_PROCD" "$T"
 unset MONITOR_TEST_CONTROL_MODE
 run_case late_probe_rejected 'reason=probe_late' 0 \
     "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"

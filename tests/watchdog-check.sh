@@ -17,6 +17,7 @@ cat > "$tmp/bin/ubus" <<'SH'
 #!/bin/sh
 [ "$1 $2 $3 $4" = '-t 5 call service' ] || exit 9
 [ "$WATCH_TEST_PROCD" != down ] || exit 1
+if [ "$WATCH_TEST_PROCD" = down_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then exit 1; fi
 printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":12345}}}}\n'
 SH
 cat > "$tmp/bin/jsonfilter" <<'SH'
@@ -28,10 +29,17 @@ case "$4" in
             n=$((n + 1))
             printf '%s\n' "$n" > "$WATCH_TEST_PID_COUNTER"
             if [ "$n" -ge 2 ]; then echo 54321; else echo none; fi
+        elif [ "$WATCH_TEST_PROCD" = pid_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then
+            echo 54321
         else
             printf '%s\n' "$WATCH_TEST_PID"
         fi ;;
-    *'"running"'*) printf '%s\n' "$WATCH_TEST_RUNNING" ;;
+    *'"running"'*)
+        if [ "$WATCH_TEST_PROCD" = stopped_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then
+            echo false
+        else
+            printf '%s\n' "$WATCH_TEST_RUNNING"
+        fi ;;
     *) exit 9 ;;
 esac
 SH
@@ -59,6 +67,13 @@ cat > "$tmp/bin/nslookup" <<'SH'
 #!/bin/sh
 [ "$1 $2 $3 $4" = '-timeout=3 -retry=1 -type=A fakeip.podkop.fyi' ] || exit 9
 [ "$5" = 127.0.0.42 ] || exit 9
+: > "$WATCH_TEST_DNS_CALLED"
+case "${WATCH_TEST_DNS_MAINTENANCE:-}" in
+    reload) mkdir -p "$PODKOP_GUARD_WATCH_PROC_ROOT/321"
+        printf '/bin/sh\000/usr/bin/podkop\000reload\000' > "$PODKOP_GUARD_WATCH_PROC_ROOT/321/cmdline" ;;
+    list_update) mkdir -p "$PODKOP_GUARD_WATCH_PROC_ROOT/321"
+        printf '/bin/sh\000/usr/bin/podkop\000list_update\000' > "$PODKOP_GUARD_WATCH_PROC_ROOT/321/cmdline" ;;
+esac
 case "$WATCH_TEST_DNS" in
     healthy) printf 'Server: 127.0.0.42\nAddress: 127.0.0.42:53\n\nName: fakeip.podkop.fyi\nAddress: 198.18.0.194\n' ;;
     highrange) printf 'Name: fakeip.podkop.fyi\nAddress: 198.19.255.255\n' ;;
@@ -88,7 +103,7 @@ case_run() {
     name=$1 expected=$2 expected_rc=$3 dns=$4 nft=$5 pid=$6 running=$7 shutdown=$8 config=$9
     shift 9
     procd=$1
-    rm -f "$tmp/pid-counter"
+    rm -f "$tmp/pid-counter" "$tmp/dns-called"
     set +e
     output=$(env PATH="$tmp/bin:$PATH" \
         PODKOP_GUARD_WATCH_CONFIG="$tmp/config.json" \
@@ -98,7 +113,7 @@ case_run() {
         WATCH_TEST_DNS="$dns" WATCH_TEST_NFT="$nft" WATCH_TEST_PID="$pid" \
         WATCH_TEST_RUNNING="$running" WATCH_TEST_SHUTDOWN="$shutdown" \
         WATCH_TEST_CONFIG="$config" WATCH_TEST_PROCD="$procd" \
-        WATCH_TEST_PID_COUNTER="$tmp/pid-counter" \
+        WATCH_TEST_PID_COUNTER="$tmp/pid-counter" WATCH_TEST_DNS_CALLED="$tmp/dns-called" \
         sh "$script" watchdog-check 2>&1)
     rc=$?
     set -e
@@ -144,6 +159,24 @@ case_run() {
         procd_rapid_respawn)
             case "$output" in *'reason=procd_returned '*) ;; *)
                 echo "FAIL $name: procd replacement not treated as transition $output" >&2; exit 1 ;;
+            esac ;;
+        premaintenance_*)
+            case "$output" in *'reason=list_update '*|*'reason=podkop_lifecycle '*) ;; *)
+                echo "FAIL $name: missing maintenance reason $output" >&2; exit 1 ;;
+            esac
+            [ ! -e "$tmp/dns-called" ] || { echo "FAIL $name: DNS ran during maintenance" >&2; exit 1; } ;;
+        maintenance_started_*)
+            case "$output" in *'reason=list_update '*|*'reason=podkop_lifecycle '*) ;; *)
+                echo "FAIL $name: missing transition after DNS $output" >&2; exit 1 ;;
+            esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        procd_lost_during_*)
+            case "$output" in *'reason=procd_unavailable '*) ;; *)
+                echo "FAIL $name: RPC failure not UNKNOWN $output" >&2; exit 1 ;;
+            esac ;;
+        pid_changed_during_*|process_stopped_during_dns)
+            case "$output" in *'reason=procd_pid_changed '*) ;; *)
+                echo "FAIL $name: stale DNS evidence $output" >&2; exit 1 ;;
             esac ;;
     esac
     tests=$((tests + 1))
@@ -223,5 +256,27 @@ WATCH_TEST_PID_RETURN=1
 export WATCH_TEST_PID_RETURN
 case_run procd_rapid_respawn TRANSITION 0 healthy present none true 0 valid up
 unset WATCH_TEST_PID_RETURN
+
+# B5.2c.1: bracket both successful and failed DNS observations with
+# lifecycle checks. FakeIP success is not a baseline during maintenance.
+mkdir -p "$tmp/proc/321"
+printf '/bin/sh\000/usr/bin/podkop\000list_update\000' > "$tmp/proc/321/cmdline"
+case_run premaintenance_list_healthy TRANSITION 0 healthy present 12345 true 0 valid up
+printf '/bin/sh\000/usr/bin/podkop\000reload\000' > "$tmp/proc/321/cmdline"
+case_run premaintenance_reload_healthy TRANSITION 0 healthy present 12345 true 0 valid up
+rm -f "$tmp/proc/321/cmdline"
+WATCH_TEST_DNS_MAINTENANCE=reload
+export WATCH_TEST_DNS_MAINTENANCE
+case_run maintenance_started_healthy TRANSITION 0 healthy present 12345 true 0 valid up
+rm -f "$tmp/proc/321/cmdline"
+WATCH_TEST_DNS_MAINTENANCE=list_update
+case_run maintenance_started_timeout TRANSITION 0 timeout present 12345 true 0 valid up
+unset WATCH_TEST_DNS_MAINTENANCE
+rm -f "$tmp/proc/321/cmdline"
+case_run procd_lost_during_healthy UNKNOWN 2 healthy present 12345 true 0 valid down_after_dns
+case_run procd_lost_during_timeout UNKNOWN 2 timeout present 12345 true 0 valid down_after_dns
+case_run pid_changed_during_healthy TRANSITION 0 healthy present 12345 true 0 valid pid_after_dns
+case_run pid_changed_during_timeout TRANSITION 0 timeout present 12345 true 0 valid pid_after_dns
+case_run process_stopped_during_dns TRANSITION 0 healthy present 12345 true 0 valid stopped_after_dns
 
 printf 'PASS: %s observer-only scenarios\n' "$tests"

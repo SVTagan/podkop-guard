@@ -1021,8 +1021,19 @@ watchdog_check() {
             printf 'WATCHDOG state=TRANSITION reason=procd_returned pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
             return 0
         fi
+        if watch_maintenance_active; then
+            printf 'WATCHDOG state=TRANSITION reason=%s pid=none nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_NFT"
+            return 0
+        fi
         printf 'WATCHDOG state=SUSPECT_PROCESS_MISSING pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
         return 1
+    fi
+
+    # Even a successful local DNS reply during a known lifecycle operation
+    # is not a stable baseline. Check both sides of the DNS observation.
+    if watch_maintenance_active; then
+        printf 'WATCHDOG state=TRANSITION reason=%s pid=%s nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_PID" "$WATCH_NFT"
+        return 0
     fi
 
     # This initial probe deliberately supports only the observed Podkop FakeIP
@@ -1045,8 +1056,17 @@ watchdog_check() {
     # avoid treating a normal transition as failure of the previous process.
     watch_box_pid
     rc=$?
+    if [ "$rc" -eq 2 ]; then
+        # A failed RPC is not evidence of a particular service transition.
+        printf 'WATCHDOG state=UNKNOWN reason=procd_unavailable nft=%s\n' "$WATCH_NFT"
+        return 2
+    fi
     if [ "$rc" -ne 0 ] || [ "$WATCH_PID" != "$check_pid" ]; then
         printf 'WATCHDOG state=TRANSITION reason=procd_pid_changed nft=%s\n' "$WATCH_NFT"
+        return 0
+    fi
+    if watch_maintenance_active; then
+        printf 'WATCHDOG state=TRANSITION reason=%s pid=%s dns=%s nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
         return 0
     fi
     if [ "$WATCH_DNS" = "fakeip" ] && [ "$WATCH_NFT" = "present" ]; then
@@ -1057,10 +1077,6 @@ watchdog_check() {
         return 0
     fi
     if [ "$WATCH_DNS" = "timeout" ]; then
-        if watch_maintenance_active; then
-            printf 'WATCHDOG state=TRANSITION reason=%s pid=%s dns=timeout nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_PID" "$WATCH_NFT"
-            return 0
-        fi
         if ! watch_conntrack_status; then
             printf 'WATCHDOG state=UNKNOWN reason=conntrack_unverified pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
             return 2
@@ -1553,6 +1569,11 @@ watchdog_monitor() {
             fi
             last_phase=UNKNOWN
             last_state=UNKNOWN
+            armed_pid=""
+            control_pid=""
+            control_attempts=0
+            last_pid=""
+            missing_active=0
             streak=0
             streak_kind=""
             sample_no=$((sample_no + 1))
@@ -1609,7 +1630,7 @@ watchdog_monitor() {
                 rest=${sample_output#* reason=}
                 sample_reason=${rest%% *}
                 case "$sample_reason" in
-                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|unsupported_dns_config|procd_returned|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
+                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|unsupported_dns_config|procd_returned|procd_pid_changed|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
                     *) sample_reason="" ;;
                 esac ;;
         esac
@@ -1674,6 +1695,16 @@ watchdog_monitor() {
                 phase=TRANSITION
                 ;;
             UNKNOWN)
+                # A sampling gap may hide a restart, even if the next
+                # observed numeric PID is unchanged. Require a fresh
+                # healthy baseline and loopback control after uncertainty.
+                armed_pid=""
+                control_pid=""
+                control_attempts=0
+                last_pid=""
+                if [ "$sample_reason" = procd_unavailable ]; then
+                    hold_until=$((now + grace))
+                fi
                 missing_active=0
                 streak=0
                 streak_kind=""
@@ -1681,6 +1712,12 @@ watchdog_monitor() {
                 ;;
             SUSPECT_PROCESS_MISSING|SUSPECT_DNS_TIMEOUT)
                 if [ "$state" = SUSPECT_PROCESS_MISSING ]; then
+                    # Loss of the registered process invalidates even a
+                    # previously healthy DNS baseline for the same PID.
+                    armed_pid=""
+                    control_pid=""
+                    control_attempts=0
+                    last_pid=""
                     if [ "$missing_active" -eq 0 ]; then
                         hold_until=$((now + grace))
                         missing_active=1

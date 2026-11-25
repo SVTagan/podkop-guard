@@ -187,6 +187,13 @@ grep -Fq 'observer-only scenarios' /tmp/pg-b3-watch-tests
 run_watch_suite watchdog-monitor.sh /tmp/pg-b3-monitor-tests
 grep -Fq 'deterministic monitor scenarios' /tmp/pg-b3-monitor-tests
 echo PASS_VM_B3_LOCAL_NEGATIVE_FIXTURES
+for marker in premaintenance_list_healthy premaintenance_reload_healthy maintenance_started_healthy maintenance_started_timeout procd_lost_during_healthy procd_lost_during_timeout pid_changed_during_healthy pid_changed_during_timeout process_stopped_during_dns; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+for marker in procd_gap_invalidates_baseline unknown_gap_invalidates_baseline missing_invalidates_baseline maintenance_invalidates_baseline procd_gap_fresh_baseline_rearms procd_gap_discards_loopback; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
+done
+echo PASS_VM_B5_LIFECYCLE_BASELINE
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline
