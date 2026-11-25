@@ -196,6 +196,10 @@ for marker in background_result_no_running_orphan leader_gone_no_running_orphan 
     grep -Fq "PASS $marker" /tmp/pg-b4-deadline
 done
 echo PASS_VM_B5_SESSION_LIFECYCLE
+for marker in actual_prearm_TERM_cleanup actual_prearm_KILL_cleanup actual_active_TERM_cleanup actual_active_KILL_cleanup; do
+    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+done
+echo PASS_VM_B5_ACTUAL_CONTROLLER
 echo PASS_VM_B4_ISOLATED_DEADLINE
 grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
 grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests

@@ -268,4 +268,109 @@ set -e
 }
 passed=$((passed + 1))
 echo 'PASS prearm_failure_cleanup'
+
+# B5.2b: signal the actual controller rather than the outer CLI. The
+# setsid wrapper gates pre-arm progress by stopping its verified parent;
+# it never stops an unrelated process. No production fault hook.
+mkdir "$tmp/actual-bin"
+B5_REAL_SETSID=$(command -v setsid)
+export B5_REAL_SETSID
+cat > "$tmp/actual-bin/setsid" <<'SH'
+#!/bin/sh
+[ "$4" = b5 ] || exit 19
+dir=$6
+read -r owner birth < "$dir/owner" || exit 19
+verify_parent() {
+    IFS= read -r stat < /proc/self/stat || return 1
+    rest=${stat##*) }; set -- $rest
+    [ "$2" = "$owner" ] || return 1
+    IFS= read -r stat < "/proc/$owner/stat" || return 1
+    rest=${stat##*) }; set -- $rest
+    [ "$#" -ge 20 ] && [ "${20}" = "$birth" ]
+}
+verify_parent || exit 19
+if [ "$B5_PHASE" = prearm ]; then
+    kill -STOP "$owner" || exit 19
+fi
+printf '%s\n' "$dir" > "$B5_CASE_DIR"
+exec "$B5_REAL_SETSID" "$@"
+SH
+chmod +x "$tmp/actual-bin/setsid"
+
+# Return success only for the original, non-zombie controller identity.
+b5_controller_alive() {
+    { IFS= read -r stat < "/proc/$owner/stat"; } 2>/dev/null || return 1
+    rest=${stat##*) }; set -- $rest
+    [ "$#" -ge 20 ] && [ "${20}" = "$birth" ] || return 1
+    case "$1" in Z|X|x) return 1 ;; esac
+    return 0
+}
+b5_session_live() {
+    for entry in /proc/[0-9]*/stat; do
+        { IFS= read -r stat < "$entry"; } 2>/dev/null || continue
+        rest=${stat##*) }; set -- $rest
+        [ "$#" -ge 4 ] || continue
+        case "$1" in Z|X|x) continue ;; esac
+        [ "$3" = "$session" ] && [ "$4" = "$session" ] && return 0
+    done
+    return 1
+}
+for phase in prearm active; do
+    for signal in TERM KILL; do
+        rm -f "$tmp/actual-dir" "$tmp/childpid"
+        DEADLINE_FIXTURE=hung
+        export DEADLINE_FIXTURE
+        PATH="$tmp/actual-bin:$PATH" B5_PHASE="$phase" B5_CASE_DIR="$tmp/actual-dir" \
+            sh "$worker" watchdog-check-bounded 8 > "$tmp/actual.out" 2>&1 &
+        cli=$!
+        started=$(date +%s)
+        dir=
+        while :; do
+            if [ -s "$tmp/actual-dir" ]; then
+                read -r dir < "$tmp/actual-dir"
+                if [ -s "$dir/owner" ] && [ -s "$dir/pid" ] &&
+                   { [ "$phase" = prearm ] || [ -s "$tmp/childpid" ]; }; then break; fi
+            fi
+            [ "$(( $(date +%s) - started ))" -lt 7 ] || {
+                echo "FAIL actual_${phase}_${signal}: setup" >&2
+                cat "$tmp/actual.out" >&2
+                exit 1
+            }
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        read -r owner birth < "$dir/owner"
+        read -r session session_birth < "$dir/pid"
+        case "$owner:$birth:$session:$session_birth" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+        [ "$owner" -gt 1 ] && [ "$session" -gt 1 ] && [ "$owner" != "$session" ] &&
+            b5_controller_alive || { echo 'FAIL actual controller identity' >&2; exit 1; }
+        if [ "$phase" = prearm ]; then
+            [ ! -f "$dir/armed" ] || { echo 'FAIL prearm gate already armed' >&2; exit 1; }
+            IFS= read -r stat < "/proc/$owner/stat"
+            rest=${stat##*) }
+            case "$rest" in 'T '*) ;; *) echo 'FAIL controller was not stopped' >&2; exit 1 ;; esac
+        else
+            [ -f "$dir/armed" ] || exit 1
+        fi
+        kill "-$signal" "$owner"
+        if [ "$phase" = prearm ] && [ "$signal" = TERM ] && b5_controller_alive; then
+            kill -CONT "$owner"
+        fi
+        started=$(date +%s)
+        while b5_controller_alive || b5_session_live ||
+              [ -e "$dir" ] || [ -e "$dir.abandoned" ]; do
+            [ "$(( $(date +%s) - started ))" -lt 16 ] || {
+                echo "FAIL actual_${phase}_${signal}: cleanup dir=$dir owner=$owner session=$session" >&2
+                cat "$tmp/actual.out" >&2
+                exit 1
+            }
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        wait "$cli" 2>/dev/null || :
+        if [ "$phase" = prearm ]; then
+            [ ! -e "$tmp/childpid" ] || { echo 'FAIL diagnostic launched before arm' >&2; exit 1; }
+        fi
+        passed=$((passed + 1))
+        echo "PASS actual_${phase}_${signal}_cleanup"
+    done
+done
 printf 'PASS: %s B4 bounded cases\n' "$passed"

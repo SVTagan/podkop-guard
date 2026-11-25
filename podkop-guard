@@ -1169,7 +1169,7 @@ watch_bounded_cleanup() {
         rm -f "$WATCH_BOUND_DIR/pid" "$WATCH_BOUND_DIR/result" "$WATCH_BOUND_DIR/rc" \
             "$WATCH_BOUND_DIR/expired" "$WATCH_BOUND_DIR/armed" "$WATCH_BOUND_DIR/notify" \
             "$WATCH_BOUND_DIR/arm" "$WATCH_BOUND_DIR/cancel" "$WATCH_BOUND_DIR/finished" \
-            "$WATCH_BOUND_DIR/guard" "$WATCH_BOUND_DIR/rc.tmp"
+            "$WATCH_BOUND_DIR/guard" "$WATCH_BOUND_DIR/rc.tmp" "$WATCH_BOUND_DIR/owner"
         rmdir "$WATCH_BOUND_DIR" 2>/dev/null || :
     fi
     if [ "$WATCH_BOUND_WAIT" = fifo ]; then
@@ -1179,7 +1179,7 @@ watch_bounded_cleanup() {
 }
 
 watchdog_check_bounded() (
-    local limit script rc wake until identity
+    local limit script rc wake until identity owner_stat owner_pid
     [ "$#" -le 1 ] || { err "usage: watchdog-check-bounded [seconds 3..120]"; exit 2; }
     limit="$1"
     [ -n "$limit" ] || limit="$PODKOP_GUARD_WATCH_MAX_SAMPLE"
@@ -1202,6 +1202,14 @@ watchdog_check_bounded() (
     WATCH_BOUND_QUIET=0
     trap 'watch_bounded_cleanup' EXIT
     trap 'exit 2' TERM INT
+    # Record the actual controller (which may be a shell subshell), not $$.
+    IFS= read -r owner_stat < /proc/self/stat || exit 2
+    owner_pid=${owner_stat%% *}
+    owner_stat=${owner_stat##*) }
+    set -- $owner_stat
+    [ "$#" -ge 20 ] && watch_monitor_number "$owner_pid" &&
+        watch_monitor_number "${20}" && [ "$owner_pid" -gt 1 ] || exit 2
+    printf '%s %s\n' "$owner_pid" "${20}" > "$WATCH_BOUND_DIR/owner" || exit 2
     if command -v mkfifo >/dev/null 2>&1 &&
        (IFS= read -r -t 1 wake 2>/dev/null <<'PG_TIMED_READ'
 ready
@@ -1213,6 +1221,38 @@ PG_TIMED_READ
     fi
     setsid sh -c '
         script=$1 dir=$2 mode=$3 limit=$4
+        read -r owner_pid owner_birth < "$dir/owner" || exit 2
+        case "$owner_pid:$owner_birth" in *[!0-9:]*|:*|*:) exit 2 ;; esac
+        [ "$owner_pid" -gt 1 ] || exit 2
+        # Failure to read an existing proc entry is not proof of death.
+        # Stopped owners are alive; zombies and recycled identities are not.
+        owner_gone() {
+            [ -d "/proc/$owner_pid" ] || return 0
+            { IFS= read -r owner_line < "/proc/$owner_pid/stat"; } 2>/dev/null || return 1
+            owner_rest=${owner_line##*) }
+            set -- $owner_rest
+            [ "$#" -ge 20 ] || return 1
+            case "$1" in Z|X|x) return 0 ;; esac
+            [ "${20}" != "$owner_birth" ]
+        }
+        reclaim_abandoned() {
+            # Only the private directory of this session, never a global
+            # /tmp sweep. Rename first so ongoing probe writes cannot
+            # recreate files at the old pathname during cleanup.
+            orphan="$dir.abandoned"
+            if [ ! -e "$orphan" ] && [ ! -L "$orphan" ] &&
+               mv -T "$dir" "$orphan" 2>/dev/null; then
+                rm -f "$orphan/pid" "$orphan/result" "$orphan/rc" \
+                    "$orphan/expired" "$orphan/armed" "$orphan/notify" \
+                    "$orphan/arm" "$orphan/cancel" "$orphan/finished" \
+                    "$orphan/guard" "$orphan/rc.tmp" "$orphan/owner"
+                rmdir "$orphan" 2>/dev/null || :
+            elif [ -d "$orphan" ]; then
+                # The other supervisor may have won the rename. Give its
+                # cleanup a bounded chance before signalling the group.
+                sleep 1
+            fi
+        }
         # Verify the actual session leader, not the setsid launcher PID.
         IFS= read -r stat < /proc/self/stat || exit 2
         session_pid=${stat%% *}
@@ -1233,7 +1273,10 @@ PG_TIMED_READ
                 sleep 0.1 2>/dev/null || sleep 1
             done
         fi
-        [ -f "$dir/armed" ] && [ ! -f "$dir/cancel" ] || exit 2
+        if [ ! -f "$dir/armed" ] || [ -f "$dir/cancel" ] || owner_gone; then
+            if owner_gone; then reclaim_abandoned; fi
+            exit 2
+        fi
         # Both the independent guard and the leader enforce the deadline.
         # The leader remains responsive even if its guard is killed.
         read -r started unused < /proc/uptime || exit 2
@@ -1256,6 +1299,11 @@ PG_TIMED_READ
             set -- "$1" $rest
             [ "$#" -ge 5 ] && [ "$4" = "$session_pid" ] &&
                 [ "$5" = "$session_pid" ] || exit 2
+            if owner_gone; then
+                reclaim_abandoned
+                kill -KILL 0
+                exit 2
+            fi
             if [ "$1" = expired ] || deadline_reached || [ -f "$dir/cancel" ]; then
                 : > "$dir/expired"
             fi
