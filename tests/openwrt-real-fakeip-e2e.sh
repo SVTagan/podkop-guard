@@ -12,6 +12,8 @@ box=
 box_birth=
 monitor=
 monitor_birth=
+subscriber=
+subscriber_birth=
 # Return live state and starttime; refuse malformed/dead proc records.
 proc_identity() (
     case "$1" in ''|*[!0-9]*) exit 1 ;; esac
@@ -54,7 +56,19 @@ resume_box() {
     our_box || return 1
     case "$identity" in T\ *|t\ *) kill -CONT "$box" ;; esac
 }
+stop_events() {
+    [ -n "$subscriber" ] || return 0
+    id=$(proc_identity "$subscriber" || :)
+    if [ -n "$subscriber_birth" ] && [ "${id#* }" = "$subscriber_birth" ] &&
+       [ "$(readlink -f "/proc/$subscriber/exe" 2>/dev/null)" = "$(readlink -f "$(command -v ubus)")" ]; then
+        kill -TERM "$subscriber" 2>/dev/null || :
+        wait "$subscriber" 2>/dev/null || :
+    fi
+    subscriber=
+    subscriber_birth=
+}
 cleanup() {
+    stop_events
     if [ -n "$monitor" ] && [ -n "$monitor_birth" ]; then
         id=$(proc_identity "$monitor" || :)
         if [ "${id#* }" = "$monitor_birth" ]; then
@@ -75,7 +89,7 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fail() {
     echo "FAIL_VM_B6_FAKEIP $*" >&2
-    for f in ready.log monitor.log recovered.log; do
+    for f in ready.log monitor.log recovered.log respawn-monitor.log notifications.log respawn-check.log exhausted.log manual-stop.log; do
         if [ -f "$tmp/$f" ]; then cat "$tmp/$f" >&2; fi
     done
     exit 1
@@ -249,3 +263,204 @@ sha256sum /etc/podkop-guard/lkg-marker /etc/podkop-guard/lkg.srs \
     /etc/podkop-guard/lkg-subnets.lst > "$tmp/lkg.after"
 cmp -s "$tmp/lkg.before" "$tmp/lkg.after" || fail lkg_changed
 echo PASS_VM_B6_REAL_FAKEIP_LIFECYCLE
+
+# B6.1b.2: real procd respawn and exhaustion. The previously verified
+# FakeIP fixture is reused; this is NOT an installed Podkop instance.
+# The respawn policy here is test-only, not a proposed production policy.
+respawn_service=$(printf '%s\n' "$service" | jq -c '
+    .instances["sing-box.main"].respawn = ["60","2","2"]')
+assert_absent() {
+    initial=$(registered) || return 1
+    printf '%s\n' "$initial" | jq -e 'type == "object" and (has("sing-box") | not)' >/dev/null &&
+        ! pidof sing-box >/dev/null 2>&1
+}
+await_running() {
+    local previous attempt id
+    previous=$1
+    attempt=0
+    while [ "$attempt" -lt 12 ]; do
+        if our_registration; then
+            box=$(printf '%s\n' "$raw" | jq -er '
+                .["sing-box"].instances["sing-box.main"] |
+                select(.running == true and (.pid|type) == "number") | .pid
+            ' 2>/dev/null) || box=
+            if [ -n "$box" ]; then
+                id=$(proc_identity "$box" || :)
+                box_birth=${id#* }
+                if [ "$box:$box_birth" != "$previous" ] && our_box; then
+                    # Use the actual running process and actual DNS, not
+                    # merely the successful return of service list.
+                    if sh "$worker" watchdog-check-bounded 8 > "$tmp/respawn-check.log" 2>&1 &&
+                       grep -Fq "WATCHDOG state=HEALTHY_SAMPLED pid=$box dns=fakeip nft=present" "$tmp/respawn-check.log" &&
+                       our_box; then
+                        cat "$tmp/respawn-check.log"
+                        return 0
+                    fi
+                fi
+            fi
+        fi
+        attempt=$((attempt + 1)); sleep 1
+    done
+    return 1
+}
+start_respawn_service() {
+    assert_absent || fail respawn_preexisting
+    owned=1
+    ubus -t 3 call service set "$respawn_service" >/dev/null
+    await_running none || fail respawn_initial_health
+    our_registration || fail respawn_registration
+    printf '%s\n' "$raw" | jq -e '
+        .["sing-box"].instances["sing-box.main"].respawn |
+        .threshold == 60 and .timeout == 2 and .retry == 2
+    ' >/dev/null || fail wrong_respawn_policy
+}
+old_gone() {
+    local id
+    id=$(proc_identity "$1" || :)
+    [ "${id#* }" != "$2" ]
+}
+wait_absent() {
+    local attempt
+    attempt=0
+    while ! assert_absent; do
+        [ "$attempt" -lt 8 ] || return 1
+        attempt=$((attempt + 1)); sleep 1
+    done
+}
+# Capture actual notifications of the service object (not broadcast
+# events). No claim of complete history, even when capture succeeds.
+ubus -S subscribe service > "$tmp/notifications.log" 2>&1 &
+subscriber=$!
+id=$(proc_identity "$subscriber") || fail subscriber_identity
+subscriber_birth=${id#* }
+sleep 1
+start_respawn_service
+first_pid=$box
+first_birth=$box_birth
+echo "VM_B6_RESPAWN_INITIAL pid=$box birth=$box_birth"
+
+# First exit while an independent observer is sampling. Use real grace
+# (shortened only for fixture). A transient absence must not confirm.
+PODKOP_GUARD_WATCH_GRACE=10 sh "$worker" watchdog-monitor 5 2 > "$tmp/respawn-monitor.log" 2>&1 &
+monitor=$!
+id=$(proc_identity "$monitor") || fail respawn_monitor_identity
+monitor_birth=${id#* }
+attempt=0
+while ! grep -Fxq "MONITOR sample=1/5 state=HEALTHY_SAMPLED phase=HEALTHY pid=$box streak=0" "$tmp/respawn-monitor.log"; do
+    [ "$attempt" -lt 8 ] || fail respawn_monitor_baseline
+    attempt=$((attempt + 1)); sleep 1
+done
+our_box || fail before_first_exit
+kill -TERM "$box"
+# Avoid competing for the bounded probe lease while the monitor is active.
+wait "$monitor" || fail respawn_monitor_rc
+monitor=
+cat "$tmp/respawn-monitor.log"
+grep -Fxq 'MONITOR_END completed=5 confirmations=0 action=none' "$tmp/respawn-monitor.log" ||
+    fail respawn_false_confirmation
+if grep -q '^MONITOR_EVENT confirmed=' "$tmp/respawn-monitor.log"; then fail respawn_extra_confirmation; fi
+await_running "$first_pid:$first_birth" || fail first_respawn
+old_gone "$first_pid" "$first_birth" || fail first_process_still_alive
+grep -Fxq "MONITOR sample=5/5 state=HEALTHY_SAMPLED phase=HEALTHY pid=$box streak=0" "$tmp/respawn-monitor.log" ||
+    fail monitor_no_fresh_health
+echo "PASS_VM_B6_NATIVE_RESPAWN old=$first_pid:$first_birth new=$box:$box_birth"
+
+# Second exit consumes the second allowed retry. No service set/start
+# between exits: only procd may create the replacement.
+old_pid=$box; old_birth=$box_birth
+our_box || fail before_second_exit
+kill -TERM "$box"
+await_running "$old_pid:$old_birth" || fail second_respawn
+old_gone "$old_pid" "$old_birth" || fail second_process_still_alive
+echo "VM_B6_SECOND_RESPAWN old=$old_pid:$old_birth new=$box:$box_birth"
+
+# Third exit within threshold exceeds retry=2. The exact upstream
+# instances retain STOPPED registration and disable respawn.
+old_pid=$box; old_birth=$box_birth
+our_box || fail before_third_exit
+kill -TERM "$box"
+attempt=0
+while :; do
+    if our_registration && old_gone "$old_pid" "$old_birth" &&
+       printf '%s\n' "$raw" | jq -e '
+           .["sing-box"].instances["sing-box.main"] |
+           .running == false and (has("respawn") | not)
+       ' >/dev/null; then break; fi
+    [ "$attempt" -lt 8 ] || fail exhaustion_not_observed
+    attempt=$((attempt + 1)); sleep 1
+done
+echo "VM_B6_EXHAUSTED_REGISTRATION $raw"
+# Observe longer than two respawn delays; ensure no replacement.
+for n in 1 2 3 4 5; do
+    sleep 1
+    our_registration && printf '%s\n' "$raw" | jq -e '
+        .["sing-box"].instances["sing-box.main"] |
+        .running == false and (has("respawn") | not)
+    ' >/dev/null && ! pidof sing-box >/dev/null 2>&1 ||
+        fail unexpected_respawn_after_exhaustion
+done
+snapshot=$(sh "$worker" watchdog-procd-snapshot)
+echo "$snapshot"
+case "$snapshot" in 'PROCD_SNAPSHOT state=STOPPED '*'action=none') ;; *) fail exhausted_snapshot ;; esac
+# Record the actual resident classification. There is not yet a
+# contract distinguishing exhausted respawn from all manual stops.
+sh "$worker" watchdog-monitor 3 0 > "$tmp/exhausted.log" 2>&1 || fail exhausted_monitor
+cat "$tmp/exhausted.log"
+grep -Eq '^MONITOR_END completed=3 confirmations=[01] action=none$' "$tmp/exhausted.log" ||
+    fail exhausted_monitor_end
+if grep -q 'state=HEALTHY_SAMPLED' "$tmp/exhausted.log"; then fail exhausted_false_health; fi
+echo PASS_VM_B6_NATIVE_RESPAWN_EXHAUSTION
+
+# Remove only our retained registration, then test an explicit operator
+# stop of a fresh owned instance with respawn enabled.
+our_registration || fail exhausted_ownership
+ubus -t 3 call service delete '{"name":"sing-box"}' >/dev/null
+wait_absent || fail exhausted_cleanup
+owned=0
+start_respawn_service
+manual_pid=$box; manual_birth=$box_birth
+our_box || fail manual_stop_ownership
+ubus -t 3 call service delete '{"name":"sing-box"}' >/dev/null
+wait_absent && old_gone "$manual_pid" "$manual_birth" || fail manual_stop_cleanup
+owned=0
+sleep 3
+assert_absent || fail manual_stop_respawned
+snapshot=$(sh "$worker" watchdog-procd-snapshot)
+echo "$snapshot"
+case "$snapshot" in 'PROCD_SNAPSHOT state=UNREGISTERED '*'action=none') ;; *) fail manual_stop_snapshot ;; esac
+# This is an explicit procd delete, not Podkop stop_main: the synthetic
+# nft table remains present. Record any missing-process confirmation
+# as diagnostic evidence for B6.2, never as an approved recovery gate.
+sh "$worker" watchdog-monitor 3 0 > "$tmp/manual-stop.log" 2>&1 || fail manual_stop_monitor
+cat "$tmp/manual-stop.log"
+grep -Eq '^MONITOR_END completed=3 confirmations=[01] action=none$' "$tmp/manual-stop.log" ||
+    fail manual_stop_monitor_end
+if grep -q 'state=HEALTHY_SAMPLED' "$tmp/manual-stop.log"; then fail manual_stop_false_health; fi
+echo PASS_VM_B6_MANUAL_PROCD_STOP_EVIDENCE
+
+# Capture/inspect notifications only for this service and instance.
+# Both pinned procd sources emit thin instance.* payloads. The current
+# Guard decoder requires richer exit fields: log actual decoder output
+# for B6.2 without treating a thin payload as permission to act.
+stop_events
+for kind in instance.respawn instance.fail instance.stop; do
+    jq -c --arg k "$kind" '
+        select(type == "object" and has($k)) |
+        select(.[$k].service == "sing-box" and .[$k].instance == "sing-box.main")
+    ' "$tmp/notifications.log" > "$tmp/$kind.jsonl" || fail notification_parse
+    [ -s "$tmp/$kind.jsonl" ] || fail "missing_notification_$kind"
+    while IFS= read -r event; do
+        printf 'VM_B6_NOTIFICATION %s\n' "$event"
+        decoded=$(printf '%s\n' "$event" | sh "$worker" watchdog-procd-event)
+        printf 'VM_B6_DECODED %s\n' "$decoded"
+        case "$decoded" in 'PROCD_EVENT '*'action=none') ;; *) fail notification_authority ;; esac
+    done < "$tmp/$kind.jsonl"
+done
+echo PASS_VM_B6_REAL_PROCD_NOTIFICATION_EVIDENCE
+assert_absent || fail final_respawn_cleanup
+[ ! -e /tmp/podkop-guard-probe.lock/active ] &&
+    [ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ] || fail respawn_probe_slot_leak
+sha256sum /etc/podkop-guard/lkg-marker /etc/podkop-guard/lkg.srs \
+    /etc/podkop-guard/lkg-subnets.lst > "$tmp/lkg.after"
+cmp -s "$tmp/lkg.before" "$tmp/lkg.after" || fail respawn_lkg_changed
+echo PASS_VM_B6_REAL_RESPAWN_LIFECYCLE
