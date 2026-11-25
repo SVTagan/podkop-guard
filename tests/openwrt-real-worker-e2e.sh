@@ -200,6 +200,10 @@ for marker in actual_prearm_TERM_cleanup actual_prearm_KILL_cleanup actual_activ
     grep -Fq "PASS $marker" /tmp/pg-b4-deadline
 done
 echo PASS_VM_B5_ACTUAL_CONTROLLER
+for marker in supervisors_stopped_unknown_bounded supervisors_resumed_cleanup supervisors_lost_unknown_bounded supervisors_lost_test_only_cleanup cpu_contention_unknown_cleanup; do
+    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+done
+echo PASS_VM_B5_SUPERVISOR_LOSS
 echo PASS_VM_B4_ISOLATED_DEADLINE
 grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
 grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests

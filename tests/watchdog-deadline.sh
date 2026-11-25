@@ -37,6 +37,88 @@ case "$DEADLINE_FIXTURE" in
         [ "$3" = "$group" ] && [ "$4" = "$group" ] || exit 19
         kill -KILL "$target" || exit 19
         wait ;;
+    supervisors_stopped|supervisors_lost)
+        # Test-only injection: all targets must be members of OUR new
+        # isolated session. Keep only this fixture and its immediate
+        # wrapper alive; dash may have an additional sleep/timer subtree.
+        IFS= read -r stat < /proc/self/stat || exit 19
+        self=${stat%% *}; rest=${stat##*) }; set -- $rest
+        wrapper=$2; group=$3
+        [ "$#" -ge 20 ] && [ "$3" = "$4" ] && [ "$group" -gt 1 ] &&
+            [ "$self" != "$group" ] && [ "$wrapper" != "$group" ] || exit 19
+        read -r dir < "$B5_CASE_DIR" || exit 19
+        read -r leader leader_birth < "$dir/pid" || exit 19
+        read -r guard < "$dir/guard" || exit 19
+        [ "$leader" = "$group" ] && [ "$guard" != "$wrapper" ] &&
+            [ "$guard" != "$self" ] || exit 19
+        member_signal() {
+            member=$2
+            case "$member" in ""|*[!0-9]*) return 1 ;; esac
+            [ "$member" -gt 1 ] && [ "$member" != "$self" ] &&
+                [ "$member" != "$wrapper" ] || return 1
+            { IFS= read -r stat < "/proc/$member/stat"; } 2>/dev/null || return 1
+            rest=${stat##*) }; set -- "$1" $rest
+            [ "$#" -ge 5 ] && [ "$4" = "$group" ] && [ "$5" = "$group" ] || return 1
+            case "$2" in Z|X|x) return 1 ;; esac
+            kill "-$1" "$member"
+        }
+        # Freeze both supervisors before scanning their auxiliary children,
+        # so they cannot spawn more timer processes during the scan.
+        member_signal STOP "$leader" && member_signal STOP "$guard" || exit 19
+        for entry in /proc/[0-9]*/stat; do
+            target=${entry#/proc/}; target=${target%/stat}
+            member_signal STOP "$target" 2>/dev/null || :
+        done
+        if [ "$DEADLINE_FIXTURE" = supervisors_lost ]; then
+            for entry in /proc/[0-9]*/stat; do
+                target=${entry#/proc/}; target=${target%/stat}
+                member_signal KILL "$target" 2>/dev/null || :
+            done
+        fi
+        printf '%s %s %s\n' "$self" "$leader" "$guard" > "$B5_FAULT_READY"
+        # This independent TEST fixture stays alive until the observer
+        # returns, proving its timeout did not depend on our natural exit.
+        # Always release/kill the disposable group even if the test fails.
+        read -r now unused < /proc/uptime || exit 19
+        until=$((${now%%.*} + 25))
+        while [ ! -f "$B5_FAULT_RELEASE" ]; do
+            read -r now unused < /proc/uptime || break
+            [ "${now%%.*}" -lt "$until" ] || break
+            sleep 1
+        done
+        if [ ! -f "$B5_FAULT_RELEASE" ]; then
+            : > "$B5_FAULT_FALLBACK"
+            kill -KILL 0
+        fi
+        if [ "$DEADLINE_FIXTURE" = supervisors_stopped ]; then
+            # Only the test fixture resumes its OWN group. Surviving
+            # production supervisors must detect expiry and reclaim it.
+            kill -CONT 0
+            sleep 6
+            : > "$B5_FAULT_FALLBACK"
+        fi
+        # In the permanent-loss case this is explicitly TEST-ONLY cleanup,
+        # not a capability or guarantee of the production watchdog.
+        kill -KILL 0 ;;
+    cpu_contention)
+        # Three finite CPU-bound children, without stress-ng or extra
+        # packages. Record each actual PID/birth before consuming CPU.
+        for n in 1 2 3; do
+            (
+                IFS= read -r stat < /proc/self/stat || exit 19
+                self=${stat%% *}; rest=${stat##*) }; set -- $rest
+                printf '%s %s\n' "$self" "${20}" > "$B5_CPU_DIR/burner.$n"
+                read -r now unused < /proc/uptime || exit 19
+                until=$((${now%%.*} + 18))
+                while :; do
+                    i=0
+                    while [ "$i" -lt 1000 ]; do i=$((i + 1)); done
+                    read -r now unused < /proc/uptime || exit 19
+                    [ "${now%%.*}" -lt "$until" ] || break
+                done
+            ) &
+        done
+        wait ;;
     invalid) exit 19 ;;
     empty) : ;;
     fd_isolation)
@@ -373,4 +455,136 @@ for phase in prearm active; do
         echo "PASS actual_${phase}_${signal}_cleanup"
     done
 done
+
+# B5.2b.2: validate the observer's outer bound even when NO supervisor can
+# currently act. A single UNKNOWN sample must never confirm a Podkop fault.
+# The test fixture has its own finite emergency lifetime and, if needed,
+# reclaims its own disposable group. Never force global PID reuse or
+# signal a real Podkop/sing-box process.
+export B5_FAULT_READY="$tmp/fault-ready"
+export B5_FAULT_RELEASE="$tmp/fault-release"
+export B5_FAULT_FALLBACK="$tmp/fault-fallback"
+export B5_CPU_DIR="$tmp"
+b5_member_state() {
+    { IFS= read -r stat < "/proc/$1/stat"; } 2>/dev/null || return 1
+    rest=${stat##*) }; set -- $rest
+    [ "$#" -ge 4 ] && [ "$3" = "$session" ] && [ "$4" = "$session" ] || return 1
+    case "$1" in Z|X|x) return 1 ;; esac
+    printf '%s\n' "$1"
+}
+for fixture in supervisors_stopped supervisors_lost; do
+    rm -f "$tmp/actual-dir" "$tmp/fault.rc" "$B5_FAULT_READY" \
+        "$B5_FAULT_RELEASE" "$B5_FAULT_FALLBACK"
+    DEADLINE_FIXTURE="$fixture"
+    export DEADLINE_FIXTURE
+    started=$(date +%s)
+    (
+        set +e
+        PATH="$tmp/actual-bin:$PATH" B5_PHASE=active B5_CASE_DIR="$tmp/actual-dir" \
+            PODKOP_GUARD_WATCH_MAX_SAMPLE=5 PODKOP_GUARD_WATCH_GRACE=0 \
+            sh "$worker" watchdog-monitor 1 0 > "$tmp/fault.out" 2>&1
+        printf '%s\n' "$?" > "$tmp/fault.rc"
+    ) &
+    runner=$!
+    while [ ! -s "$B5_FAULT_READY" ]; do
+        [ "$(( $(date +%s) - started ))" -lt 8 ] || {
+            echo "FAIL $fixture: injection not ready" >&2; cat "$tmp/fault.out" >&2; exit 1;
+        }
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    read -r dir < "$tmp/actual-dir"
+    read -r session session_birth < "$dir/pid"
+    read -r mock leader guard < "$B5_FAULT_READY"
+    [ "$session" = "$leader" ] && [ "$session" -gt 1 ] || exit 1
+    while [ ! -s "$tmp/fault.rc" ]; do
+        [ "$(( $(date +%s) - started ))" -lt 18 ] || {
+            echo "FAIL $fixture: controller exceeded outer bound" >&2; cat "$tmp/fault.out" >&2; exit 1;
+        }
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    elapsed=$(( $(date +%s) - started ))
+    wait "$runner"
+    # All of the following checks precede TEST cleanup. The surviving
+    # fixture and the still-present private dir prove the controller did
+    # not wait for its diagnostic to exit or falsely report group cleanup.
+    [ "$elapsed" -lt 18 ] && [ "$(cat "$tmp/fault.rc")" = 0 ] &&
+        grep -Fq 'state=UNKNOWN phase=UNKNOWN pid=none streak=0 reason=probe_hard_deadline' "$tmp/fault.out" &&
+        grep -Fxq 'MONITOR_END completed=1 confirmations=0 action=none' "$tmp/fault.out" &&
+        [ -d "$dir" ] && b5_member_state "$mock" >/dev/null &&
+        [ ! -e "$B5_FAULT_FALLBACK" ] || {
+        echo "FAIL $fixture: unsafe or unbounded result elapsed=$elapsed" >&2
+        cat "$tmp/fault.out" >&2; exit 1
+    }
+    if [ "$fixture" = supervisors_stopped ]; then
+        [ "$(b5_member_state "$leader")" = T ] && [ "$(b5_member_state "$guard")" = T ] || {
+            echo 'FAIL supervisors_stopped: not both stopped' >&2; exit 1;
+        }
+    else
+        if b5_member_state "$leader" >/dev/null || b5_member_state "$guard" >/dev/null; then
+            echo 'FAIL supervisors_lost: a supervisor survived injection' >&2; exit 1
+        fi
+    fi
+    printf 'PASS %s_unknown_bounded elapsed_s=%s\n' "$fixture" "$elapsed"
+    passed=$((passed + 1))
+    : > "$B5_FAULT_RELEASE"
+    released=$(date +%s)
+    while b5_session_live; do
+        [ "$(( $(date +%s) - released ))" -lt 10 ] || {
+            echo "FAIL $fixture: test group did not terminate" >&2; exit 1;
+        }
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    if [ "$fixture" = supervisors_stopped ]; then
+        # Production cleanup, not the fixture's emergency kill.
+        [ ! -e "$dir" ] && [ ! -e "$dir.abandoned" ] && [ ! -e "$B5_FAULT_FALLBACK" ] || {
+            echo 'FAIL supervisors_stopped: no autonomous cleanup after CONT' >&2; exit 1;
+        }
+        echo 'PASS supervisors_resumed_cleanup'
+    else
+        # The observed limitation is intentional: with both supervisors
+        # destroyed, Guard cannot clean up safely from outside the group.
+        # Only remove the recorded private fixture files after all its
+        # processes are gone. No wildcard/global /tmp sweep.
+        case "$dir" in /tmp/podkop-guard-probe.*) ;; *) exit 1 ;; esac
+        rm -f "$dir/pid" "$dir/result" "$dir/rc" "$dir/expired" "$dir/armed" \
+            "$dir/notify" "$dir/arm" "$dir/cancel" "$dir/finished" \
+            "$dir/guard" "$dir/rc.tmp" "$dir/owner"
+        rmdir "$dir"
+        echo 'PASS supervisors_lost_test_only_cleanup'
+    fi
+    passed=$((passed + 1))
+done
+
+# Real CPU contention (not a guarantee of scheduler starvation).
+rm -f "$tmp/burner.1" "$tmp/burner.2" "$tmp/burner.3" "$tmp/actual-dir"
+DEADLINE_FIXTURE=cpu_contention
+export DEADLINE_FIXTURE
+started=$(date +%s)
+out=$(PATH="$tmp/actual-bin:$PATH" B5_PHASE=active B5_CASE_DIR="$tmp/actual-dir" \
+    PODKOP_GUARD_WATCH_MAX_SAMPLE=3 PODKOP_GUARD_WATCH_GRACE=0 \
+    sh "$worker" watchdog-monitor 1 0)
+elapsed=$(( $(date +%s) - started ))
+[ "$elapsed" -lt 15 ] &&
+    printf '%s\n' "$out" | grep -Fq 'state=UNKNOWN phase=UNKNOWN pid=none streak=0 reason=probe_hard_deadline' || {
+    echo "FAIL cpu_contention elapsed=$elapsed output=$out" >&2; exit 1;
+}
+printf '%s\n' "$out" | grep -Fxq 'MONITOR_END completed=1 confirmations=0 action=none'
+for n in 1 2 3; do
+    read -r child child_birth < "$tmp/burner.$n"
+    case "$child:$child_birth" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+    if { IFS= read -r stat < "/proc/$child/stat"; } 2>/dev/null; then
+        rest=${stat##*) }; set -- $rest
+        if [ "${20}" = "$child_birth" ]; then
+            case "$1" in Z|X|x) ;; *)
+                echo "FAIL cpu_contention: live burner $child" >&2; exit 1 ;;
+            esac
+        fi
+    fi
+done
+read -r dir < "$tmp/actual-dir"
+[ ! -e "$dir" ] && [ ! -e "$dir.abandoned" ] || {
+    echo 'FAIL cpu_contention: private resources remain' >&2; exit 1;
+}
+passed=$((passed + 1))
+printf 'PASS cpu_contention_unknown_cleanup elapsed_s=%s\n' "$elapsed"
 printf 'PASS: %s B4 bounded cases\n' "$passed"
