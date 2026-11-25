@@ -224,6 +224,9 @@ if grep -Fq 'sleep: invalid number' /tmp/pg-b3-monitor-tests; then
 fi
 echo PASS_VM_B4_RESIDENT_BOUNDED
 
+# B5.2c.2: destructive lifecycle tests only inside this disposable guest.
+PG_DISPOSABLE_VM=1 sh /mnt/pg-bundle/openwrt-procd-lifecycle-e2e.sh
+
 
 # The real LKG daemon starts with default 300s startup grace. It must remain
 # running under real procd, without performing any refresh in this short test.

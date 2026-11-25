@@ -25,6 +25,7 @@ jobs:
           sh -n tests/watchdog-procd.sh
           sh -n tests/watchdog-procd-monitor.sh
           sh -n tests/watchdog-deadline.sh
+          sh -n tests/openwrt-procd-lifecycle-e2e.sh
           sh -n tests/watchdog-init.sh
           sh -n tests/install-transaction.sh
           sh -n tests/srs-compat.sh
