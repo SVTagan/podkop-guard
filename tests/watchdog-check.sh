@@ -25,30 +25,34 @@ cat > "$tmp/bin/ubus" <<'SH'
 [ "$1 $2 $3 $4" = '-t 5 call service' ] || exit 9
 [ "$WATCH_TEST_PROCD" != down ] || exit 1
 if [ "$WATCH_TEST_PROCD" = down_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then exit 1; fi
-printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":12345}}}}\n'
-SH
-cat > "$tmp/bin/jsonfilter" <<'SH'
-#!/bin/sh
-case "$4" in
-    *'"pid"'*)
-        if [ "${WATCH_TEST_PID_RETURN:-0}" = 1 ]; then
-            n=$(cat "$WATCH_TEST_PID_COUNTER" 2>/dev/null || echo 0)
-            n=$((n + 1))
-            printf '%s\n' "$n" > "$WATCH_TEST_PID_COUNTER"
-            if [ "$n" -ge 2 ]; then echo 54321; else echo none; fi
-        elif [ "$WATCH_TEST_PROCD" = pid_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then
-            echo 54321
-        else
-            printf '%s\n' "$WATCH_TEST_PID"
-        fi ;;
-    *'"running"'*)
-        if [ "$WATCH_TEST_PROCD" = stopped_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then
-            echo false
-        else
-            printf '%s\n' "$WATCH_TEST_RUNNING"
-        fi ;;
-    *) exit 9 ;;
+case "$WATCH_TEST_PROCD" in
+    absent) echo '{}'; exit 0 ;;
+    empty_service) echo '{"sing-box":{}}'; exit 0 ;;
+    malformed_service) echo '{"sing-box":null}'; exit 0 ;;
+    malformed_instances) echo '{"sing-box":{"instances":[]}}'; exit 0 ;;
+    malformed_instance) echo '{"sing-box":{"instances":{"sing-box.main":null}}}'; exit 0 ;;
+    malformed_json) echo '{'; exit 0 ;;
+    multi_reply) printf '{}\n{}\n'; exit 0 ;;
+    wrong_command) echo '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":12345,"command":["/usr/bin/sing-box","check"]}}}}'; exit 0 ;;
+    missing_pid) echo '{"sing-box":{"instances":{"sing-box.main":{"running":true,"command":["/usr/bin/sing-box","run"]}}}}'; exit 0 ;;
 esac
+pid=$WATCH_TEST_PID
+running=$WATCH_TEST_RUNNING
+if [ "${WATCH_TEST_PID_RETURN:-0}" = 1 ]; then
+    n=$(cat "$WATCH_TEST_PID_COUNTER" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$WATCH_TEST_PID_COUNTER"
+    if [ "$n" -ge 2 ]; then pid=54321; running=true; else pid=none; running=false; fi
+elif [ "$WATCH_TEST_PROCD" = pid_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then
+    pid=54321
+elif [ "$WATCH_TEST_PROCD" = stopped_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then
+    running=false
+fi
+if [ "$running" = false ]; then
+    printf '{"sing-box":{"instances":{"sing-box.main":{"running":false,"command":["/usr/bin/sing-box","run"],"exit_code":0}}}}\n'
+else
+    printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":%s,"command":["/usr/bin/sing-box","run"]}}}}\n' "$pid"
+fi
 SH
 cat > "$tmp/bin/nft" <<'SH'
 #!/bin/sh
@@ -64,11 +68,6 @@ cat > "$tmp/bin/uci" <<'SH'
 #!/bin/sh
 [ "$1 $2 $3" = '-q get podkop.settings.shutdown_correctly' ] || exit 9
 printf '%s\n' "$WATCH_TEST_SHUTDOWN"
-SH
-cat > "$tmp/bin/jq" <<'SH'
-#!/bin/sh
-[ "$WATCH_TEST_CONFIG" = valid ] || exit 1
-exit 0
 SH
 cat > "$tmp/bin/nslookup" <<'SH'
 #!/bin/sh
@@ -118,6 +117,11 @@ case_run() {
     shift 9
     procd=$1
     rm -f "$tmp/pid-counter" "$tmp/dns-called"
+    if [ "$config" = valid ]; then
+        printf '%s\n' '{"inbounds":[{"tag":"dns-in","listen":"127.0.0.42","listen_port":53}]}' > "$tmp/config.json"
+    else
+        printf '{}\n' > "$tmp/config.json"
+    fi
     make_birth 12345 1000 S
     make_birth 54321 1001 S
     printf '700:2000\n' > "$tmp/bus"
@@ -203,6 +207,13 @@ case_run() {
             esac ;;
     esac
     case "$name" in
+        no_process) case "$output" in *'reason=procd_stopped '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+        unregistered|empty_service) case "$output" in *'reason=procd_unregistered '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+        malformed_service|malformed_instances|malformed_instance|malformed_json|multi_reply|wrong_command|missing_pid)
+            case "$output" in *'reason=procd_invalid_reply '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+    esac
+    case "$name" in
         healthy) case "$output" in *' birth=1000 bus=700:2000') ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
         same_pid_birth_changed*) case "$output" in *'reason=runtime_identity_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         bus_identity_changed*) case "$output" in *'reason=ubusd_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
@@ -224,7 +235,7 @@ case_run dns_refused      UNKNOWN                 2 refused   present 12345 true
 case_run dns_port_refused UNKNOWN                 2 unreachable present 12345 true 0 valid up
 case_run contradicted     UNKNOWN                 2 contradicted present 12345 true 0 valid up
 case_run wrong_name       UNKNOWN                 2 wrong_name present 12345 true 0 valid up
-case_run no_process       SUSPECT_PROCESS_MISSING 1 healthy   present none  false 0 valid up
+case_run no_process       UNKNOWN                 2 healthy   present none  false 0 valid up
 case_run manual_stop      INACTIVE                0 healthy   absent  none  false 1 valid up
 case_run nft_missing      UNKNOWN                 2 healthy   absent  12345 true  0 valid up
 case_run nft_unavailable  UNKNOWN                 2 healthy   error   12345 true  0 valid up
@@ -325,4 +336,14 @@ case_run bus_identity_changed_timeout TRANSITION 0 timeout present 12345 true 0 
 WATCH_TEST_ID_CHANGE=bus_lost
 case_run bus_lost_during_dns UNKNOWN 2 timeout present 12345 true 0 valid up
 unset WATCH_TEST_ID_CHANGE
+# Actual JSON structure, not a simulated jsonfilter match.
+case_run unregistered UNKNOWN 2 healthy present none false 0 valid absent
+case_run empty_service UNKNOWN 2 healthy present none false 0 valid empty_service
+case_run malformed_service UNKNOWN 2 healthy present none false 0 valid malformed_service
+case_run malformed_instances UNKNOWN 2 healthy present none false 0 valid malformed_instances
+case_run malformed_instance UNKNOWN 2 healthy present none false 0 valid malformed_instance
+case_run malformed_json UNKNOWN 2 healthy present none false 0 valid malformed_json
+case_run multi_reply UNKNOWN 2 healthy present none false 0 valid multi_reply
+case_run wrong_command UNKNOWN 2 healthy present 12345 true 0 valid wrong_command
+case_run missing_pid UNKNOWN 2 healthy present none true 0 valid missing_pid
 printf 'PASS: %s observer-only scenarios\n' "$tests"

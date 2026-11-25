@@ -76,6 +76,14 @@ snapshot_case bus_error 'PROCD_SNAPSHOT state=UNKNOWN reason=ubus_unavailable ac
 snapshot_case invalid_reply 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_json action=none' '{' ok
 snapshot_case empty_reply 'PROCD_SNAPSHOT state=UNKNOWN reason=empty_reply action=none' '' ok
 
+# B6.2a.1: missing keys and invalid types must not be conflated.
+snapshot_case empty_service 'PROCD_SNAPSHOT state=UNREGISTERED reason=not_listed action=none' '{"sing-box":{}}' ok
+snapshot_case malformed_service 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_service action=none' '{"sing-box":null}' ok
+snapshot_case malformed_instances 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_instances action=none' '{"sing-box":{"instances":[]}}' ok
+snapshot_case malformed_instance 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_instance action=none' '{"sing-box":{"instances":{"sing-box.main":null}}}' ok
+snapshot_case multi_reply 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_reply action=none' '{} {}' ok
+snapshot_case wrong_operation 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","check"]}}}}' ok
+snapshot_case stopped_with_pid 'PROCD_SNAPSHOT state=UNKNOWN reason=incomplete_instance action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":false,"pid":24430,"command":["/usr/bin/sing-box","run"]}}}}' ok
 # Disallow arguments that could accidentally request service actions.
 for cmd in watchdog-procd-event watchdog-procd-snapshot; do
     set +e

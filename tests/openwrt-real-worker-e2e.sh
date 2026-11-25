@@ -205,6 +205,10 @@ for marker in same_pid_new_birth bus_generation_new_baseline bus_generation_rear
     grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
 done
 echo PASS_VM_B5_RUNTIME_IDENTITY
+for marker in unregistered empty_service malformed_service malformed_instances malformed_instance malformed_json multi_reply wrong_command missing_pid; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+echo PASS_VM_B6_PROCD_SCHEMA_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

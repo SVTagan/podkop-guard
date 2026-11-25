@@ -887,16 +887,31 @@ watch_runtime_bus_verify() {
 }
 
 watch_box_pid() {
-    local services
-    services=$(ubus -t 5 call service list '{"name":"sing-box"}' 2>/dev/null) || return 2
-    [ -n "$services" ] || return 2
-    WATCH_PID=$(jsonfilter -s "$services" -e '@["sing-box"]["instances"]["sing-box.main"]["pid"]' 2>/dev/null) || return 2
-    WATCH_RUNNING=$(jsonfilter -s "$services" -e '@["sing-box"]["instances"]["sing-box.main"]["running"]' 2>/dev/null) || return 2
-    case "$WATCH_PID" in
-        ''|*[!0-9]*) WATCH_PID="none"; return 1 ;;
+    local report rest
+    WATCH_PID=none
+    WATCH_RUNNING=unknown
+    WATCH_PROCD_STATE=UNKNOWN
+    WATCH_PROCD_REASON=procd_invalid_reply
+    report=$(watch_procd_report) || return 2
+    case "$report" in
+        'PROCD_SNAPSHOT state=RUNNING pid='*' action=none')
+            rest=${report#* pid=}; WATCH_PID=${rest%% *}
+            WATCH_RUNNING=true
+            WATCH_PROCD_STATE=RUNNING
+            return 0 ;;
+        'PROCD_SNAPSHOT state=STOPPED '*)
+            WATCH_RUNNING=false
+            WATCH_PROCD_STATE=STOPPED
+            WATCH_PROCD_REASON=procd_stopped
+            return 1 ;;
+        'PROCD_SNAPSHOT state=UNREGISTERED '*)
+            WATCH_PROCD_STATE=UNREGISTERED
+            WATCH_PROCD_REASON=procd_unregistered
+            return 1 ;;
+        'PROCD_SNAPSHOT state=UNKNOWN reason=ubus_unavailable action=none')
+            WATCH_PROCD_REASON=procd_unavailable ;;
     esac
-    [ "$WATCH_RUNNING" = "true" ] || return 1
-    return 0
+    return 2
 }
 
 watch_nft_table() {
@@ -1014,7 +1029,7 @@ watch_conntrack_status() {
 }
 
 watchdog_check() {
-    local tool shutdown check_pid rc check_birth check_bus current_birth control_identity
+    local tool shutdown check_pid rc check_birth check_bus current_birth control_identity initial_procd_state
     WATCH_PID="none"
     WATCH_RUNNING="unknown"
     WATCH_NFT="unknown"
@@ -1023,7 +1038,7 @@ watchdog_check() {
     WATCH_CONNTRACK=unverified
     WATCH_MAINTENANCE=""
 
-    for tool in ubus jsonfilter nft jq nslookup uci awk grep tr; do
+    for tool in ubus nft jq nslookup uci awk grep tr; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             printf 'WATCHDOG state=UNKNOWN reason=missing_tool:%s\n' "$tool"
             return 2
@@ -1045,10 +1060,11 @@ watchdog_check() {
     watch_box_pid
     rc=$?
     if [ "$rc" -eq 2 ]; then
-        printf 'WATCHDOG state=UNKNOWN reason=procd_unavailable nft=%s\n' "$WATCH_NFT"
+        printf 'WATCHDOG state=UNKNOWN reason=%s nft=%s\n' "$WATCH_PROCD_REASON" "$WATCH_NFT"
         return 2
     fi
     if [ "$rc" -ne 0 ]; then
+        initial_procd_state=$WATCH_PROCD_STATE
         if watch_maintenance_active; then
             printf 'WATCHDOG state=TRANSITION reason=%s pid=none nft=%s\n' "$WATCH_MAINTENANCE" "$WATCH_NFT"
             return 0
@@ -1057,7 +1073,7 @@ watchdog_check() {
         watch_box_pid
         rc=$?
         if [ "$rc" -eq 2 ]; then
-            printf 'WATCHDOG state=UNKNOWN reason=procd_unavailable nft=%s\n' "$WATCH_NFT"
+            printf 'WATCHDOG state=UNKNOWN reason=%s nft=%s\n' "$WATCH_PROCD_REASON" "$WATCH_NFT"
             return 2
         elif [ "$rc" -eq 0 ]; then
             printf 'WATCHDOG state=TRANSITION reason=procd_returned pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
@@ -1070,8 +1086,13 @@ watchdog_check() {
         watch_runtime_bus_verify "$check_bus"
         rc=$?
         case "$rc" in 1) return 0 ;; 2) return 2 ;; esac
-        printf 'WATCHDOG state=SUSPECT_PROCESS_MISSING pid=%s nft=%s bus=%s\n' "$WATCH_PID" "$WATCH_NFT" "$check_bus"
-        return 1
+        if [ "$WATCH_PROCD_STATE" != "$initial_procd_state" ]; then
+            printf 'WATCHDOG state=TRANSITION reason=procd_registration_changed pid=none nft=%s\n' "$WATCH_NFT"
+            return 0
+        fi
+        # Absence alone cannot establish that Podkop is expected to run.
+        printf 'WATCHDOG state=UNKNOWN reason=%s pid=none nft=%s bus=%s\n' "$WATCH_PROCD_REASON" "$WATCH_NFT" "$check_bus"
+        return 2
     fi
 
     # Even a successful local DNS reply during a known lifecycle operation
@@ -1116,7 +1137,7 @@ watchdog_check() {
     rc=$?
     if [ "$rc" -eq 2 ]; then
         # A failed RPC is not evidence of a particular service transition.
-        printf 'WATCHDOG state=UNKNOWN reason=procd_unavailable nft=%s\n' "$WATCH_NFT"
+        printf 'WATCHDOG state=UNKNOWN reason=%s nft=%s\n' "$WATCH_PROCD_REASON" "$WATCH_NFT"
         return 2
     fi
     if [ "$rc" -ne 0 ] || [ "$WATCH_PID" != "$check_pid" ]; then
@@ -1709,7 +1730,7 @@ watchdog_monitor() {
                 rest=${sample_output#* reason=}
                 sample_reason=${rest%% *}
                 case "$sample_reason" in
-                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|unsupported_dns_config|procd_returned|procd_pid_changed|runtime_identity_unavailable|runtime_identity_changed|ubusd_identity_unavailable|ubusd_changed|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
+                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|procd_registration_changed|unsupported_dns_config|procd_returned|procd_pid_changed|runtime_identity_unavailable|runtime_identity_changed|ubusd_identity_unavailable|ubusd_changed|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
                     *) sample_reason="" ;;
                 esac ;;
         esac
@@ -1787,9 +1808,10 @@ watchdog_monitor() {
                 control_identity=""
                 control_attempts=0
                 last_identity=""
-                if [ "$sample_reason" = procd_unavailable ] || [ "$sample_reason" = ubusd_identity_unavailable ] || [ "$sample_reason" = runtime_identity_unavailable ]; then
-                    hold_until=$((now + grace))
-                fi
+                case "$sample_reason" in
+                    procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|ubusd_identity_unavailable|runtime_identity_unavailable)
+                        hold_until=$((now + grace)) ;;
+                esac
                 missing_active=0
                 streak=0
                 streak_kind=""
@@ -2074,13 +2096,9 @@ watchdog_procd_event() {
     printf '%s\n' "$decoded"
 }
 
-watchdog_procd_snapshot() {
+# Shared schema parser: RUNNING is a procd report, not proof of liveness.
+watch_procd_report() {
     local raw parsed
-    [ "$#" -eq 0 ] || { err "usage: watchdog-procd-snapshot"; return 2; }
-    if ! command -v ubus >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-        printf 'PROCD_SNAPSHOT state=UNKNOWN reason=missing_tool action=none\n'
-        return 0
-    fi
     raw=$(ubus -t 5 call service list '{"name":"sing-box"}' 2>/dev/null) || {
         printf 'PROCD_SNAPSHOT state=UNKNOWN reason=ubus_unavailable action=none\n'
         return 0
@@ -2089,33 +2107,54 @@ watchdog_procd_snapshot() {
         printf 'PROCD_SNAPSHOT state=UNKNOWN reason=empty_reply action=none\n'
         return 0
     fi
-    parsed=$(printf '%s\n' "$raw" | jq -r '
-        if type != "object" then
-            "PROCD_SNAPSHOT state=UNKNOWN reason=invalid_reply action=none"
-        elif (.["sing-box"]?.instances? | type) != "object" or
-             (.["sing-box"].instances["sing-box.main"]? | type) != "object" then
-            "PROCD_SNAPSHOT state=UNREGISTERED reason=not_listed action=none"
-        else
-            .["sing-box"].instances["sing-box.main"] as $i |
-            if ($i.command | type) != "array" or
-               ($i.command[0] != "/usr/bin/sing-box") then
-                "PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none"
-            elif $i.running == true and
-                 ($i.pid | type) == "number" and $i.pid >= 1 and $i.pid == ($i.pid|floor) then
-                "PROCD_SNAPSHOT state=RUNNING pid=\($i.pid) action=none"
-            elif $i.running == false then
-                if ($i.exit_code | type) == "number" and $i.exit_code >= 0 and
-                   $i.exit_code == ($i.exit_code|floor) then
-                    "PROCD_SNAPSHOT state=STOPPED exit_code=\($i.exit_code) reason=undetermined action=none"
-                else
-                    "PROCD_SNAPSHOT state=STOPPED exit_code=unknown reason=undetermined action=none"
+    parsed=$(printf '%s\n' "$raw" | jq -rs '
+        def unknown($r): "PROCD_SNAPSHOT state=UNKNOWN reason=\($r) action=none";
+        def absent: "PROCD_SNAPSHOT state=UNREGISTERED reason=not_listed action=none";
+        def integer: if type == "number" then . == floor else false end;
+        if length != 1 then unknown("invalid_reply")
+        else .[0] |
+            if type != "object" then unknown("invalid_reply")
+            elif (keys - ["sing-box"] | length) != 0 then unknown("invalid_reply")
+            elif (has("sing-box") | not) then absent
+            elif (.["sing-box"] | type) != "object" then unknown("invalid_service")
+            else .["sing-box"] |
+                if (has("instances") | not) then absent
+                elif (.instances | type) != "object" then unknown("invalid_instances")
+                elif (.instances | has("sing-box.main") | not) then absent
+                elif (.instances["sing-box.main"] | type) != "object" then unknown("invalid_instance")
+                else .instances["sing-box.main"] as $i |
+                    if ($i.command | type) != "array" or
+                       ($i.command[0] != "/usr/bin/sing-box") then unknown("wrong_command")
+                    elif $i.running == true then
+                        if ($i.pid | integer) and $i.pid > 1 and $i.pid <= 2147483647 then
+                            if $i.command[1] == "run" and all($i.command[]; type == "string") then
+                                "PROCD_SNAPSHOT state=RUNNING pid=\($i.pid) action=none"
+                            else unknown("wrong_command") end
+                        else unknown("incomplete_instance") end
+                    elif $i.running == false then
+                        if ($i | has("pid")) then unknown("incomplete_instance")
+                        elif $i.command[1] != "run" or (all($i.command[]; type == "string") | not) then
+                            unknown("wrong_command")
+                        elif ($i.exit_code | integer) and $i.exit_code >= 0 then
+                            "PROCD_SNAPSHOT state=STOPPED exit_code=\($i.exit_code) reason=undetermined action=none"
+                        else
+                            "PROCD_SNAPSHOT state=STOPPED exit_code=unknown reason=undetermined action=none"
+                        end
+                    else unknown("incomplete_instance") end
                 end
-            else
-                "PROCD_SNAPSHOT state=UNKNOWN reason=incomplete_instance action=none"
             end
         end
     ' 2>/dev/null) || parsed='PROCD_SNAPSHOT state=UNKNOWN reason=invalid_json action=none'
     printf '%s\n' "$parsed"
+}
+
+watchdog_procd_snapshot() {
+    [ "$#" -eq 0 ] || { err "usage: watchdog-procd-snapshot"; return 2; }
+    if ! command -v ubus >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        printf 'PROCD_SNAPSHOT state=UNKNOWN reason=missing_tool action=none\n'
+        return 0
+    fi
+    watch_procd_report
 }
 
 # Stage B2: procd event stream + independent snapshot reconciliation.

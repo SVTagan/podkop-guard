@@ -421,12 +421,19 @@ done
 snapshot=$(sh "$worker" watchdog-procd-snapshot)
 echo "$snapshot"
 case "$snapshot" in 'PROCD_SNAPSHOT state=STOPPED '*'action=none') ;; *) fail exhausted_snapshot ;; esac
-# Record the actual resident classification. There is not yet a
-# contract distinguishing exhausted respawn from all manual stops.
+# Prove the old jsonfilter no-match failure on the real stopped reply.
+raw=$(registered)
+rc=0
+old_pid_field=$(jsonfilter -s "$raw" -e '@["sing-box"]["instances"]["sing-box.main"]["pid"]') || rc=$?
+printf 'VM_B6_JSONFILTER_STOPPED rc=%s value=%s\n' "$rc" "$old_pid_field"
+[ "$rc" -eq 1 ] && [ -z "$old_pid_field" ] || fail stopped_jsonfilter_contract
+# STOPPED is observable, but cause and operator intent are not proven.
 sh "$worker" watchdog-monitor 3 0 > "$tmp/exhausted.log" 2>&1 || fail exhausted_monitor
 cat "$tmp/exhausted.log"
-grep -Eq '^MONITOR_END completed=3 confirmations=[01] action=none$' "$tmp/exhausted.log" ||
+grep -Fxq 'MONITOR_END completed=3 confirmations=0 action=none' "$tmp/exhausted.log" ||
     fail exhausted_monitor_end
+[ "$(grep -c 'state=UNKNOWN phase=UNKNOWN pid=none streak=0 reason=procd_stopped$' "$tmp/exhausted.log")" -eq 3 ] ||
+    fail exhausted_runtime_reason
 if grep -q 'state=HEALTHY_SAMPLED' "$tmp/exhausted.log"; then fail exhausted_false_health; fi
 echo PASS_VM_B6_NATIVE_RESPAWN_EXHAUSTION
 
@@ -452,8 +459,16 @@ case "$snapshot" in 'PROCD_SNAPSHOT state=UNREGISTERED '*'action=none') ;; *) fa
 # as diagnostic evidence for B6.2, never as an approved recovery gate.
 sh "$worker" watchdog-monitor 3 0 > "$tmp/manual-stop.log" 2>&1 || fail manual_stop_monitor
 cat "$tmp/manual-stop.log"
-grep -Eq '^MONITOR_END completed=3 confirmations=[01] action=none$' "$tmp/manual-stop.log" ||
+grep -Fxq 'MONITOR_END completed=3 confirmations=0 action=none' "$tmp/manual-stop.log" ||
     fail manual_stop_monitor_end
+[ "$(grep -c 'state=UNKNOWN phase=UNKNOWN pid=none streak=0 reason=procd_unregistered$' "$tmp/manual-stop.log")" -eq 3 ] ||
+    fail manual_stop_runtime_reason
+raw=$(registered)
+rc=0
+old_pid_field=$(jsonfilter -s "$raw" -e '@["sing-box"]["instances"]["sing-box.main"]["pid"]') || rc=$?
+printf 'VM_B6_JSONFILTER_UNREGISTERED rc=%s value=%s\n' "$rc" "$old_pid_field"
+[ "$rc" -eq 1 ] && [ -z "$old_pid_field" ] || fail unregistered_jsonfilter_contract
+echo PASS_VM_B6_PROCD_SCHEMA_REAL_ABSENCE
 if grep -q 'state=HEALTHY_SAMPLED' "$tmp/manual-stop.log"; then fail manual_stop_false_health; fi
 echo PASS_VM_B6_MANUAL_PROCD_STOP_EVIDENCE
 
