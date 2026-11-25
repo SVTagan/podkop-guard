@@ -9,6 +9,13 @@ trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/bin"
 mkdir -p "$tmp/proc" "$tmp/netfilter"
 : > "$tmp/list.pid"
+make_birth() {
+    mkdir -p "$tmp/proc/$1"
+    { printf '%s (sing box) %s' "$1" "$3"
+      n=0; while [ "$n" -lt 18 ]; do printf ' 0'; n=$((n + 1)); done
+      printf ' %s 0\n' "$2"
+    } > "$tmp/proc/$1/stat"
+}
 printf '{}\n' > "$tmp/config.json"
 printf '10\n' > "$tmp/netfilter/nf_conntrack_count"
 printf '100\n' > "$tmp/netfilter/nf_conntrack_max"
@@ -68,6 +75,13 @@ cat > "$tmp/bin/nslookup" <<'SH'
 [ "$1 $2 $3 $4" = '-timeout=3 -retry=1 -type=A fakeip.podkop.fyi' ] || exit 9
 [ "$5" = 127.0.0.42 ] || exit 9
 : > "$WATCH_TEST_DNS_CALLED"
+case "${WATCH_TEST_ID_CHANGE:-}" in
+    birth) sed 's/ 1000 0$/ 1001 0/' "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/stat" > "$WATCH_TEST_DNS_CALLED.stat"
+        mv "$WATCH_TEST_DNS_CALLED.stat" "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/stat" ;;
+    birth_lost) rm -f "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/stat" ;;
+    bus) printf '700:2001\n' > "$PODKOP_GUARD_PROCD_BUS_FILE" ;;
+    bus_lost) printf 'DOWN\n' > "$PODKOP_GUARD_PROCD_BUS_FILE" ;;
+esac
 case "${WATCH_TEST_DNS_MAINTENANCE:-}" in
     reload) mkdir -p "$PODKOP_GUARD_WATCH_PROC_ROOT/321"
         printf '/bin/sh\000/usr/bin/podkop\000reload\000' > "$PODKOP_GUARD_WATCH_PROC_ROOT/321/cmdline" ;;
@@ -104,10 +118,19 @@ case_run() {
     shift 9
     procd=$1
     rm -f "$tmp/pid-counter" "$tmp/dns-called"
+    make_birth 12345 1000 S
+    make_birth 54321 1001 S
+    printf '700:2000\n' > "$tmp/bus"
+    case "$name" in
+        missing_birth) rm -f "$tmp/proc/12345/stat" ;;
+        zombie_birth) make_birth 12345 1000 Z ;;
+        malformed_birth) printf '12345 (sing box) S 0\n' > "$tmp/proc/12345/stat" ;;
+        missing_bus_identity) printf 'DOWN\n' > "$tmp/bus" ;;
+    esac
     set +e
     output=$(env PATH="$tmp/bin:$PATH" \
         PODKOP_GUARD_WATCH_CONFIG="$tmp/config.json" \
-        PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc" \
+        PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc" PODKOP_GUARD_PROCD_BUS_FILE="$tmp/bus" \
         PODKOP_GUARD_WATCH_LIST_PID_FILE="$tmp/list.pid" \
         PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/netfilter" \
         WATCH_TEST_DNS="$dns" WATCH_TEST_NFT="$nft" WATCH_TEST_PID="$pid" \
@@ -179,6 +202,13 @@ case_run() {
                 echo "FAIL $name: stale DNS evidence $output" >&2; exit 1 ;;
             esac ;;
     esac
+    case "$name" in
+        healthy) case "$output" in *' birth=1000 bus=700:2000') ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
+        same_pid_birth_changed*) case "$output" in *'reason=runtime_identity_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+        bus_identity_changed*) case "$output" in *'reason=ubusd_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+        missing_birth|zombie_birth|malformed_birth|birth_lost_during_dns) case "$output" in *'reason=runtime_identity_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+        missing_bus_identity|bus_lost_during_dns) case "$output" in *'reason=ubusd_identity_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+    esac
     tests=$((tests + 1))
     printf 'PASS %s\n' "$name"
 }
@@ -242,14 +272,14 @@ export PODKOP_GUARD_WATCH_CONTROL_PROBE WATCH_TEST_PING
 case_run control_healthy HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 WATCH_TEST_PING=down
 case_run control_filtered HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
-PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID=12345
-export PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID=12345:1000:700:2000
+export PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID
 case_run control_suppresses_suspect UNKNOWN 2 timeout present 12345 true 0 valid up
 WATCH_TEST_PING=up
 case_run control_recovers SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
-PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID=67890
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID=12345:999:700:2000
 case_run old_pid_no_control SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
-unset PODKOP_GUARD_WATCH_CONTROL_PROBE PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID WATCH_TEST_PING
+unset PODKOP_GUARD_WATCH_CONTROL_PROBE PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID WATCH_TEST_PING
 
 # A new procd instance between samples is a transition, not missing process.
 WATCH_TEST_PID_RETURN=1
@@ -279,4 +309,20 @@ case_run pid_changed_during_healthy TRANSITION 0 healthy present 12345 true 0 va
 case_run pid_changed_during_timeout TRANSITION 0 timeout present 12345 true 0 valid pid_after_dns
 case_run process_stopped_during_dns TRANSITION 0 healthy present 12345 true 0 valid stopped_after_dns
 
+# B5.2c.3: same numerical PID with a different birth, and bus generation.
+case_run missing_birth UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run zombie_birth UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run malformed_birth UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run missing_bus_identity UNKNOWN 2 healthy present 12345 true 0 valid up
+export WATCH_TEST_ID_CHANGE=birth
+case_run same_pid_birth_changed_healthy TRANSITION 0 healthy present 12345 true 0 valid up
+case_run same_pid_birth_changed_timeout TRANSITION 0 timeout present 12345 true 0 valid up
+WATCH_TEST_ID_CHANGE=birth_lost
+case_run birth_lost_during_dns UNKNOWN 2 healthy present 12345 true 0 valid up
+WATCH_TEST_ID_CHANGE=bus
+case_run bus_identity_changed_healthy TRANSITION 0 healthy present 12345 true 0 valid up
+case_run bus_identity_changed_timeout TRANSITION 0 timeout present 12345 true 0 valid up
+WATCH_TEST_ID_CHANGE=bus_lost
+case_run bus_lost_during_dns UNKNOWN 2 timeout present 12345 true 0 valid up
+unset WATCH_TEST_ID_CHANGE
 printf 'PASS: %s observer-only scenarios\n' "$tests"

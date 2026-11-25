@@ -194,6 +194,13 @@ for marker in procd_gap_invalidates_baseline unknown_gap_invalidates_baseline mi
     grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
 done
 echo PASS_VM_B5_LIFECYCLE_BASELINE
+for marker in missing_birth zombie_birth malformed_birth missing_bus_identity same_pid_birth_changed_healthy same_pid_birth_changed_timeout birth_lost_during_dns bus_identity_changed_healthy bus_identity_changed_timeout bus_lost_during_dns; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+for marker in same_pid_new_birth bus_generation_new_baseline bus_generation_rearmed bus_generation_missing_streak identity_missing_rejected bus_missing_rejected birth_change_discards_loopback bus_change_discards_loopback; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
+done
+echo PASS_VM_B5_RUNTIME_IDENTITY
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

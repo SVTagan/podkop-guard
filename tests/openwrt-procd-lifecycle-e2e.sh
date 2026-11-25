@@ -221,6 +221,22 @@ while ! grep -Fq "snapshot=RUNNING pid=$second history=INCOMPLETE action=none" "
     [ "$attempt" -lt 12 ] || fail first_subscription
     attempt=$((attempt + 1)); sleep 1
 done
+# Reuse the same nine-sample sequence while the REAL ubusd changes,
+# keeping the sing-box process unchanged. No additional service restart.
+mv "$tmp/monitor.log" "$tmp/pid-monitor.log"
+printf '0\n' > "$tmp/count"
+rm -f "$tmp/restart-ready" "$tmp/restart-done"
+PATH="$tmp/bin:$PATH" PG_LIFECYCLE_DIR="$tmp" \
+    PODKOP_GUARD_WATCH_CONFIG="$tmp/watch.json" \
+    PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/conntrack" \
+    PODKOP_GUARD_WATCH_GRACE=0 PODKOP_GUARD_WATCH_MAX_SAMPLE=20 \
+    sh "$worker" watchdog-monitor 9 0 > "$tmp/monitor.log" 2>&1 &
+monitor=$!
+attempt=0
+while [ ! -e "$tmp/restart-ready" ]; do
+    [ "$attempt" -lt 10 ] || fail bus_dns_handshake
+    attempt=$((attempt + 1)); sleep 1
+done
 [ "$(bus_identity)" = "$bus_before" ] || fail unexpected_bus_change
 kill -TERM "${bus_before%%:*}"
 attempt=0
@@ -233,6 +249,21 @@ while [ "$attempt" -lt 20 ]; do
 done
 [ "$attempt" -lt 20 ] || fail ubusd_not_recovered
 [ "$(birth "$second")" = "$second_birth" ] || fail unexpected_box_replacement
+: > "$tmp/restart-done"
+wait "$monitor" || fail bus_monitor_rc
+monitor=
+cat "$tmp/monitor.log"
+grep -Fxq "MONITOR sample=1/9 state=HEALTHY_SAMPLED phase=HEALTHY pid=$second streak=0" "$tmp/monitor.log" || fail bus_initial_baseline
+grep -Fxq 'MONITOR sample=2/9 state=TRANSITION phase=TRANSITION pid=none streak=0 reason=ubusd_changed' "$tmp/monitor.log" || fail stale_bus_evidence
+for n in 3 4 5; do
+    grep -Fxq "MONITOR sample=$n/9 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=$second streak=0" "$tmp/monitor.log" || fail "stale_bus_baseline_$n"
+done
+grep -Fxq "MONITOR sample=6/9 state=HEALTHY_SAMPLED phase=HEALTHY pid=$second streak=0" "$tmp/monitor.log" || fail bus_fresh_baseline
+grep -Fxq "MONITOR sample=9/9 state=SUSPECT_DNS_TIMEOUT phase=CONFIRMED pid=$second streak=3" "$tmp/monitor.log" || fail bus_fresh_confirmation
+grep -Fxq 'MONITOR_END completed=9 confirmations=1 action=none' "$tmp/monitor.log" || fail bus_monitor_end
+[ "$(grep -c '^MONITOR_EVENT confirmed=' "$tmp/monitor.log")" -eq 1 ] || fail bus_extra_confirmation
+[ "$(cat "$tmp/count")" = 9 ] || fail bus_probe_count
+echo PASS_VM_B5_REAL_BUS_BASELINE
 # A renewed subscription must be followed by a fresh RUNNING snapshot.
 # Do not demand an observed outage: a quick respawn may be between samples.
 wait "$follower" || fail follower_rc

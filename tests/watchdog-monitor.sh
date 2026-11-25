@@ -19,7 +19,7 @@ line=$(sed -n "${counter}p" "$MONITOR_TEST_FIXTURE")
 [ -n "$line" ] || exit 9
 oldifs=$IFS
 IFS='|'
-read -r state pid rc simulated_uptime reason <<EOF
+read -r state pid rc simulated_uptime reason birth bus <<EOF
 $line
 EOF
 IFS=$oldifs
@@ -32,6 +32,8 @@ if [ "$state" = HANG ]; then
     wait
     exit 9
 fi
+birth=${birth:-1000}
+bus=${bus:-700:2000}
 suffix=
 if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
     if [ "$state" = HEALTHY_SAMPLED ] &&
@@ -39,13 +41,15 @@ if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
         suffix=' loopback=ok'
     fi
     if [ "$state" = SUSPECT_DNS_TIMEOUT ] &&
-       [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_PID:-}" = "$pid" ]; then
+       [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID:-}" = "$pid:$birth:$bus" ]; then
         state=UNKNOWN
         rc=2
         suffix=' reason=loopback_unresponsive'
     fi
 fi
 if [ -n "$reason" ]; then suffix="$suffix reason=$reason"; fi
+[ "$birth" = - ] || suffix="$suffix birth=$birth"
+[ "$bus" = - ] || suffix="$suffix bus=$bus"
 printf 'WATCHDOG state=%s pid=%s mock=yes%s\n' "$state" "$pid" "$suffix"
 exit "$rc"
 SH
@@ -152,6 +156,30 @@ export MONITOR_TEST_CONTROL_MODE
 run_case procd_gap_discards_loopback \
     'sample=3/3 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
     "$H" "$U_PROCD" "$T"
+unset MONITOR_TEST_CONTROL_MODE
+# Same PID, new process birth or ubusd generation: no old evidence.
+T_BIRTH='SUSPECT_DNS_TIMEOUT|101|1|||1001|700:2000'
+T_BUS='SUSPECT_DNS_TIMEOUT|101|1|||1000|700:2001'
+H_BUS='HEALTHY_SAMPLED|101|0|||1000|700:2001'
+M_BUS='SUSPECT_PROCESS_MISSING|none|1|||1000|700:2001'
+run_case same_pid_new_birth 'sample=5/5 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T" "$T_BIRTH" "$T_BIRTH" "$T_BIRTH"
+run_case bus_generation_new_baseline 'sample=5/5 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T" "$T_BUS" "$T_BUS" "$T_BUS"
+run_case bus_generation_rearmed 'sample=6/6 state=SUSPECT_DNS_TIMEOUT phase=CONFIRMED pid=101 streak=3' 1 \
+    "$H" "$T" "$H_BUS" "$T_BUS" "$T_BUS" "$T_BUS"
+run_case bus_generation_missing_streak 'sample=3/3 state=SUSPECT_PROCESS_MISSING phase=SUSPECT pid=none streak=1' 0 \
+    "$M" "$M" "$M_BUS"
+run_case identity_missing_rejected 'sample=4/4 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    'HEALTHY_SAMPLED|101|0|||-|700:2000' "$T" "$T" "$T"
+run_case bus_missing_rejected 'sample=4/4 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    'HEALTHY_SAMPLED|101|0|||1000|-' "$T" "$T" "$T"
+MONITOR_TEST_CONTROL_MODE=1
+export MONITOR_TEST_CONTROL_MODE
+run_case birth_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T_BIRTH"
+run_case bus_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T_BUS"
 unset MONITOR_TEST_CONTROL_MODE
 run_case late_probe_rejected 'reason=probe_late' 0 \
     "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"
