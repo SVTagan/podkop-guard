@@ -1101,68 +1101,85 @@ watch_monitor_now() {
     WATCH_MONITOR_NOW=$whole
 }
 
-# B4/B5: isolated sample used by both manual and resident observation.
-# A BusyBox setsid launcher may fork. The session leader therefore writes
-# its own PID to a private RAM file; the launcher PID is NOT trusted.
-watch_bounded_group_owned() {
-    local pid proc line rest
-    pid=$1
-    # A session leader can exit while its descendants remain in the
-    # original PGID/SID. Checking only /proc/<leader>/stat would miss them.
-    if [ -r "/proc/$pid/stat" ] && awk -v id="$pid" '{
-        sub(/^.*\) /, "")
-        if ($3 == id && $4 == id) exit 0
-        exit 1
-    }' "/proc/$pid/stat"; then
-        return 0
+# B5.2: only a member of the isolated session may signal its own group.
+# The controller validates PID + starttime but never signals a numeric PGID.
+watch_bounded_identity() {
+    local line rest
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -gt 1 ] 2>/dev/null || return 1
+    { IFS= read -r line < "/proc/$1/stat"; } 2>/dev/null || return 1
+    rest=${line##*) }
+    set -- $rest
+    [ "$#" -ge 20 ] || return 1
+    [ "$3" = "$4" ] || return 1
+    printf '%s %s %s\n' "$3" "$4" "${20}"
+}
+
+watch_bounded_now() {
+    local whole rest
+    read -r whole rest < /proc/uptime || return 1
+    whole=${whole%%.*}
+    watch_monitor_number "$whole" || return 1
+    WATCH_BOUND_NOW=$whole
+}
+
+watch_bounded_group_live() {
+    local proc line rest identity
+    [ -n "$WATCH_BOUND_PID" ] || return 1
+    # A new leader with the same numeric PID cannot belong to the old session.
+    if [ -r "/proc/$WATCH_BOUND_PID/stat" ]; then
+        identity=$(watch_bounded_identity "$WATCH_BOUND_PID") || identity=
+        if [ -n "$identity" ] && [ "$identity" != "$WATCH_BOUND_PID $WATCH_BOUND_PID $WATCH_BOUND_START" ]; then
+            return 1
+        fi
     fi
-    # BusyBox-safe, shell-builtin scan; no heavyweight ps/pgrep dependency.
     for proc in /proc/[0-9]*/stat; do
         [ -r "$proc" ] || continue
-        IFS= read -r line < "$proc" || continue
+        { IFS= read -r line < "$proc"; } 2>/dev/null || continue
         case "$line" in *') '*) rest=${line##*) } ;; *) continue ;; esac
         set -- $rest
         [ "$#" -ge 4 ] || continue
-        [ "$3" = "$pid" ] && [ "$4" = "$pid" ] && return 0
+        case "$1" in Z|X|x) continue ;; esac
+        [ "$3" = "$WATCH_BOUND_PID" ] && [ "$4" = "$WATCH_BOUND_PID" ] && return 0
     done
     return 1
 }
 
-watch_bounded_stop_group() {
-    watch_bounded_group_owned "$1" || return 1
-    # POSIX/BusyBox shell builtins accept -SIGNAL -PGID, but dash's kill
-    # rejects the "-- -PGID" form and silently defeated our old timeout.
-    kill -KILL "-$1" 2>/dev/null
+watch_bounded_wait_quiet() {
+    local until
+    watch_bounded_now || return 1
+    until=$((WATCH_BOUND_NOW + 4))
+    while watch_bounded_group_live; do
+        watch_bounded_now && [ "$WATCH_BOUND_NOW" -lt "$until" ] || return 1
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 0
 }
 
 watch_bounded_cleanup() {
-    if [ -n "$WATCH_BOUND_TIMER" ]; then
-        kill -TERM "$WATCH_BOUND_TIMER" 2>/dev/null || :
-        wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
-        WATCH_BOUND_TIMER=
+    [ -n "$WATCH_BOUND_DIR" ] || return 0
+    # Wake the session's own guard, never signal an externally chosen PID.
+    : > "$WATCH_BOUND_DIR/cancel" 2>/dev/null || :
+    if [ "$WATCH_BOUND_WAIT" = fifo ]; then
+        printf 'cancel\n' >&9 2>/dev/null || :
     fi
-    if [ -n "$WATCH_BOUND_PID" ]; then
-        watch_bounded_stop_group "$WATCH_BOUND_PID" || :
-        WATCH_BOUND_PID=
-    fi
-    if [ -n "$WATCH_BOUND_LAUNCHER" ]; then
-        wait "$WATCH_BOUND_LAUNCHER" 2>/dev/null || :
-        WATCH_BOUND_LAUNCHER=
+    # Before a verified PID is armed, removing the directory is safe:
+    # the leader requires the armed marker before launching the probe.
+    if [ -z "$WATCH_BOUND_PID" ] || [ "$WATCH_BOUND_QUIET" = 1 ] || watch_bounded_wait_quiet; then
+        rm -f "$WATCH_BOUND_DIR/pid" "$WATCH_BOUND_DIR/result" "$WATCH_BOUND_DIR/rc" \
+            "$WATCH_BOUND_DIR/expired" "$WATCH_BOUND_DIR/armed" "$WATCH_BOUND_DIR/notify" \
+            "$WATCH_BOUND_DIR/arm" "$WATCH_BOUND_DIR/cancel" "$WATCH_BOUND_DIR/finished" \
+            "$WATCH_BOUND_DIR/guard" "$WATCH_BOUND_DIR/rc.tmp"
+        rmdir "$WATCH_BOUND_DIR" 2>/dev/null || :
     fi
     if [ "$WATCH_BOUND_WAIT" = fifo ]; then
         exec 8>&- 9>&-
     fi
-    if [ -n "$WATCH_BOUND_DIR" ]; then
-        rm -f "$WATCH_BOUND_DIR/pid" "$WATCH_BOUND_DIR/result" \
-            "$WATCH_BOUND_DIR/rc" "$WATCH_BOUND_DIR/expired" "$WATCH_BOUND_DIR/armed" \
-            "$WATCH_BOUND_DIR/notify" "$WATCH_BOUND_DIR/arm"
-        rmdir "$WATCH_BOUND_DIR" 2>/dev/null || :
-        WATCH_BOUND_DIR=
-    fi
+    WATCH_BOUND_DIR=
 }
 
 watchdog_check_bounded() (
-    local limit script rc tries launchpid
+    local limit script rc wake until identity
     [ "$#" -le 1 ] || { err "usage: watchdog-check-bounded [seconds 3..120]"; exit 2; }
     limit="$1"
     [ -n "$limit" ] || limit="$PODKOP_GUARD_WATCH_MAX_SAMPLE"
@@ -1180,14 +1197,11 @@ watchdog_check_bounded() (
         printf 'WATCHDOG state=UNKNOWN reason=probe_tmp_unavailable\n'; exit 2
     }
     WATCH_BOUND_PID=
-    WATCH_BOUND_LAUNCHER=
-    WATCH_BOUND_TIMER=
+    WATCH_BOUND_START=
     WATCH_BOUND_WAIT=poll
+    WATCH_BOUND_QUIET=0
     trap 'watch_bounded_cleanup' EXIT
     trap 'exit 2' TERM INT
-    # Stock OpenWrt lacks fractional sleep/read, but ash has integer read -t.
-    # Private FIFOs only wake waiters: marker files remain authoritative.
-    # Feature-detect timed read (dash lacks it), retaining the old poll path.
     if command -v mkfifo >/dev/null 2>&1 &&
        (IFS= read -r -t 1 wake 2>/dev/null <<'PG_TIMED_READ'
 ready
@@ -1197,104 +1211,144 @@ PG_TIMED_READ
         exec 8<>"$WATCH_BOUND_DIR/notify" 9<>"$WATCH_BOUND_DIR/arm"
         WATCH_BOUND_WAIT=fifo
     fi
-    # The true session leader writes its PID even if setsid forked itself.
-    # The test script executes only the existing read-only watchdog-check.
     setsid sh -c '
-        IFS=" " read -r session_pid remainder < /proc/self/stat
-        printf "%s\n" "$session_pid" > "$2/pid"
-        if [ "$3" = fifo ]; then
+        script=$1 dir=$2 mode=$3 limit=$4
+        # Verify the actual session leader, not the setsid launcher PID.
+        IFS= read -r stat < /proc/self/stat || exit 2
+        session_pid=${stat%% *}
+        rest=${stat##*) }
+        set -- $rest
+        [ "$#" -ge 20 ] && [ "$session_pid" -gt 1 ] &&
+            [ "$3" = "$session_pid" ] && [ "$4" = "$session_pid" ] || exit 2
+        printf "%s %s\n" "$session_pid" "${20}" > "$dir/pid" || exit 2
+        if [ "$mode" = fifo ]; then
             printf "pid\n" >&8
-            if [ ! -f "$2/armed" ]; then
-                IFS= read -r -t 3 wake <&9 || :
-            fi
+            IFS= read -r -t 3 wake <&9 || :
         else
-            count=0
-            while [ ! -f "$2/armed" ] && [ "$count" -lt 30 ]; do
-                count=$((count + 1))
+            read -r now unused < /proc/uptime || exit 2
+            until=$((${now%%.*} + 4))
+            while [ ! -f "$dir/armed" ] && [ ! -f "$dir/cancel" ]; do
+                read -r now unused < /proc/uptime || exit 2
+                [ "${now%%.*}" -lt "$until" ] || break
                 sleep 0.1 2>/dev/null || sleep 1
             done
         fi
-        [ -f "$2/armed" ] || exit 2
-        if [ "$3" = fifo ]; then
-            # Do not pass IPC descriptors to the actual diagnostic subtree.
-            sh "$1" watchdog-check > "$2/result" 2>&1 8>&- 9>&-
-            printf "%s\n" "$?" > "$2/rc"
-            printf "done\n" >&8
-        else
-            sh "$1" watchdog-check > "$2/result" 2>&1
-            printf "%s\n" "$?" > "$2/rc"
-        fi
-    ' b4 "$script" "$WATCH_BOUND_DIR" "$WATCH_BOUND_WAIT" >/dev/null 2>&1 &
-    WATCH_BOUND_LAUNCHER=$!
+        [ -f "$dir/armed" ] && [ ! -f "$dir/cancel" ] || exit 2
+        # Both the independent guard and the leader enforce the deadline.
+        # The leader remains responsive even if its guard is killed.
+        read -r started unused < /proc/uptime || exit 2
+        started_s=${started%%.*}
+        started_f=${started#*.}
+        case "$started_s" in ""|*[!0-9]*) exit 2 ;; esac
+        case "$started_f" in [0-9][0-9]) ;; *) exit 2 ;; esac
+        deadline_s=$((started_s + limit))
+        deadline_reached() {
+            read -r now unused < /proc/uptime || return 0
+            now_s=${now%%.*}; now_f=${now#*.}
+            case "$now_s" in ""|*[!0-9]*) return 0 ;; esac
+            case "$now_f" in [0-9][0-9]) ;; *) return 0 ;; esac
+            [ "$now_s" -gt "$deadline_s" ] ||
+                { [ "$now_s" -eq "$deadline_s" ] && [ "$now_f" -ge "$started_f" ]; }
+        }
+        finish_group() {
+            IFS= read -r stat < /proc/self/stat || exit 2
+            rest=${stat##*) }
+            set -- "$1" $rest
+            [ "$#" -ge 5 ] && [ "$4" = "$session_pid" ] &&
+                [ "$5" = "$session_pid" ] || exit 2
+            if [ "$1" = expired ] || deadline_reached || [ -f "$dir/cancel" ]; then
+                : > "$dir/expired"
+            fi
+            : > "$dir/finished"
+            if [ "$mode" = fifo ]; then printf "finished\n" >&8; fi
+            # PID 0 targets the calling process group in the kernel.
+            kill -KILL 0
+        }
+        (
+            if [ "$mode" = fifo ]; then
+                if IFS= read -r -t "$limit" wake <&9 &&
+                   [ "$wake" = done ] && [ -s "$dir/rc" ] && [ ! -f "$dir/cancel" ]; then
+                    finish_group complete
+                else
+                    finish_group expired
+                fi
+            else
+                # dash has no timed read. Keep an independent exact sleep
+                # deadline, and poll only for earlier completion/cancellation.
+                (sleep "$limit"; finish_group expired) &
+                while [ ! -s "$dir/rc" ] && [ ! -f "$dir/cancel" ]; do
+                    sleep 0.1 2>/dev/null || sleep 1
+                done
+                if [ -f "$dir/cancel" ]; then finish_group expired; fi
+                finish_group complete
+            fi
+        ) &
+        guard_pid=$!
+        printf "%s\n" "$guard_pid" > "$dir/guard" || finish_group expired
+        (
+            if [ "$mode" = fifo ]; then
+                sh "$script" watchdog-check > "$dir/result" 2>&1 8>&- 9>&-
+                printf "%s\n" "$?" > "$dir/rc.tmp" && mv "$dir/rc.tmp" "$dir/rc"
+                printf "done\n" >&9
+            else
+                sh "$script" watchdog-check > "$dir/result" 2>&1
+                printf "%s\n" "$?" > "$dir/rc.tmp" && mv "$dir/rc.tmp" "$dir/rc"
+            fi
+        ) &
+        # Backup supervisor: if the independent guard disappears, the
+        # leader still bounds the check and can signal its own group.
+        while :; do
+            if deadline_reached || [ -f "$dir/cancel" ]; then finish_group expired; fi
+            if [ -s "$dir/rc" ]; then finish_group complete; fi
+            # Only the independent guard may read the control FIFO after
+            # arming. Two concurrent readers can split one notification.
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+    ' b5 "$script" "$WATCH_BOUND_DIR" "$WATCH_BOUND_WAIT" "$limit" >/dev/null 2>&1 &
     if [ "$WATCH_BOUND_WAIT" = fifo ]; then
         if [ ! -s "$WATCH_BOUND_DIR/pid" ]; then
             IFS= read -r -t 3 wake <&8 || :
         fi
     else
-        tries=0
-        while [ ! -s "$WATCH_BOUND_DIR/pid" ] && [ "$tries" -lt 30 ]; do
-            tries=$((tries + 1))
+        watch_bounded_now || exit 2
+        until=$((WATCH_BOUND_NOW + 4))
+        while [ ! -s "$WATCH_BOUND_DIR/pid" ]; do
+            watch_bounded_now && [ "$WATCH_BOUND_NOW" -lt "$until" ] || break
             sleep 0.1 2>/dev/null || sleep 1
         done
     fi
     if [ ! -s "$WATCH_BOUND_DIR/pid" ]; then
         printf 'WATCHDOG state=UNKNOWN reason=probe_start_unverified\n'; exit 2
     fi
-    read -r WATCH_BOUND_PID < "$WATCH_BOUND_DIR/pid" || WATCH_BOUND_PID=
-    case "$WATCH_BOUND_PID" in ''|*[!0-9]*)
+    read -r WATCH_BOUND_PID WATCH_BOUND_START < "$WATCH_BOUND_DIR/pid" || WATCH_BOUND_PID=
+    if ! watch_monitor_number "$WATCH_BOUND_PID" || ! watch_monitor_number "$WATCH_BOUND_START"; then
         WATCH_BOUND_PID=
-        printf 'WATCHDOG state=UNKNOWN reason=probe_pid_invalid\n'; exit 2 ;;
-    esac
-    if ! watch_bounded_group_owned "$WATCH_BOUND_PID"; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_pid_invalid\n'; exit 2
+    fi
+    identity=$(watch_bounded_identity "$WATCH_BOUND_PID") || identity=
+    if [ "$identity" != "$WATCH_BOUND_PID $WATCH_BOUND_PID $WATCH_BOUND_START" ]; then
+        WATCH_BOUND_PID=
         printf 'WATCHDOG state=UNKNOWN reason=probe_isolation_unverified\n'; exit 2
     fi
-    # The deadline timer must exist before releasing the probe: otherwise
-    # SIGKILL between "armed" and timer launch could orphan an unbounded check.
-    # Reap the timer's own sleep child when cancelling the timer.
-    (
-        deadline_sleep=
-        trap 'if [ -n "$deadline_sleep" ]; then
-            kill -TERM "$deadline_sleep" 2>/dev/null || :
-            wait "$deadline_sleep" 2>/dev/null || :
-        fi; exit 0' TERM INT
-        if [ "$WATCH_BOUND_WAIT" = fifo ]; then
-            sleep "$limit" 8>&- 9>&- &
-        else
-            sleep "$limit" &
-        fi
-        deadline_sleep=$!
-        wait "$deadline_sleep" || exit 0
-        deadline_sleep=
-        if [ ! -s "$WATCH_BOUND_DIR/rc" ]; then
-            : > "$WATCH_BOUND_DIR/expired"
-            watch_bounded_stop_group "$WATCH_BOUND_PID" || :
-            if [ "$WATCH_BOUND_WAIT" = fifo ]; then
-                printf 'expired\n' >&8
-            fi
-        fi
-    ) &
-    WATCH_BOUND_TIMER=$!
-    # PID/PGID/SID verified and independent timer armed.
     : > "$WATCH_BOUND_DIR/armed"
-    if [ "$WATCH_BOUND_WAIT" = fifo ]; then
-        printf 'armed\n' >&9
-    fi
-    while [ ! -s "$WATCH_BOUND_DIR/rc" ] && [ ! -f "$WATCH_BOUND_DIR/expired" ]; do
+    if [ "$WATCH_BOUND_WAIT" = fifo ]; then printf 'armed\n' >&9; fi
+    # Controller timeout is a separate upper bound if the guard itself fails.
+    watch_bounded_now || exit 2
+    until=$((WATCH_BOUND_NOW + limit + 4))
+    while [ ! -f "$WATCH_BOUND_DIR/finished" ]; do
+        if ! watch_bounded_now || [ "$WATCH_BOUND_NOW" -ge "$until" ]; then
+            printf 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline\n'; exit 2
+        fi
         if [ "$WATCH_BOUND_WAIT" = fifo ]; then
-            # Also recheck markers on timeout: a notification is not evidence.
             IFS= read -r -t 1 wake <&8 || :
         else
             sleep 0.1 2>/dev/null || sleep 1
         fi
     done
-    if [ -f "$WATCH_BOUND_DIR/expired" ]; then
-        wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
-        WATCH_BOUND_TIMER=
+    if watch_bounded_wait_quiet; then WATCH_BOUND_QUIET=1; fi
+    if [ "$WATCH_BOUND_QUIET" != 1 ] || [ -f "$WATCH_BOUND_DIR/expired" ]; then
         printf 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline\n'; exit 2
     fi
-    kill -TERM "$WATCH_BOUND_TIMER" 2>/dev/null || :
-    wait "$WATCH_BOUND_TIMER" 2>/dev/null || :
-    WATCH_BOUND_TIMER=
     read -r rc < "$WATCH_BOUND_DIR/rc" || rc=invalid
     case "$rc" in 0|1|2) ;; *)
         printf 'WATCHDOG state=UNKNOWN reason=probe_invalid_exit\n'; exit 2 ;;

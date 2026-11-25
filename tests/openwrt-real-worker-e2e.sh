@@ -192,6 +192,10 @@ grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline
 grep -Eq '^TIMING quick_probes=5 elapsed_s=[0-9]+ fifo=1$' /tmp/pg-b4-deadline
 grep -Fq 'signal_KILL_no_running_orphan' /tmp/pg-b4-deadline
+for marker in background_result_no_running_orphan leader_gone_no_running_orphan guard_gone_no_running_orphan stale_identity_no_signal prearm_failure_cleanup; do
+    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+done
+echo PASS_VM_B5_SESSION_LIFECYCLE
 echo PASS_VM_B4_ISOLATED_DEADLINE
 grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
 grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests

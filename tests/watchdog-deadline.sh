@@ -14,6 +14,29 @@ case "$DEADLINE_FIXTURE" in
         (sleep 35) &
         echo $! > "$DEADLINE_CHILD_PID_FILE"
         wait ;;
+    background_result)
+        (sleep 35) &
+        echo $! > "$DEADLINE_CHILD_PID_FILE"
+        echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' ;;
+    leader_gone|guard_gone)
+        (sleep 35) &
+        echo $! > "$DEADLINE_CHILD_PID_FILE"
+        IFS= read -r stat < /proc/self/stat || exit 19
+        rest=${stat##*) }; set -- $rest; group=$3
+        [ "$3" = "$4" ] && [ "$group" -gt 1 ] || exit 19
+        target=$group
+        if [ "$DEADLINE_FIXTURE" = guard_gone ]; then
+            dir=$(tr '\000' '\n' < "/proc/$group/cmdline" | grep '^/tmp/podkop-guard-probe\.' | tail -n 1)
+            read -r target < "$dir/guard" || exit 19
+        fi
+        case "$target" in ''|*[!0-9]*) exit 19 ;; esac
+        [ "$target" -gt 1 ] || exit 19
+        IFS= read -r stat < "/proc/$target/stat" || exit 19
+        rest=${stat##*) }; set -- $rest
+        # Fault injection may target ONLY the test's own isolated session.
+        [ "$3" = "$group" ] && [ "$4" = "$group" ] || exit 19
+        kill -KILL "$target" || exit 19
+        wait ;;
     invalid) exit 19 ;;
     empty) : ;;
     fd_isolation)
@@ -156,4 +179,93 @@ for signal in TERM KILL; do
     passed=$((passed + 1))
     echo "PASS signal_${signal}_no_running_orphan"
 done
+# B5.2: a completed probe must not leave a running descendant, and
+# loss of either session leader or independent guard must remain bounded.
+for fixture in background_result leader_gone guard_gone; do
+    rm -f "$tmp/childpid"
+    expected='WATCHDOG state=UNKNOWN reason=probe_hard_deadline'
+    expect_rc=2
+    if [ "$fixture" = background_result ]; then
+        expected='WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present'
+        expect_rc=0
+    fi
+    started=$(date +%s)
+    verify "$fixture" "$expected" "$expect_rc" "$fixture"
+    elapsed=$(( $(date +%s) - started ))
+    [ "$elapsed" -lt 15 ] || { echo "FAIL $fixture elapsed=$elapsed" >&2; exit 1; }
+    read -r child < "$tmp/childpid"
+    case "$child" in ''|*[!0-9]*) exit 1 ;; esac
+    if [ -r "/proc/$child/stat" ]; then
+        stat=$(cat "/proc/$child/stat")
+        case "$stat" in *') Z '*) ;; *)
+            echo "FAIL $fixture running child $child" >&2; exit 1 ;;
+        esac
+    fi
+    passed=$((passed + 1))
+    printf 'PASS %s_no_running_orphan\n' "$fixture"
+done
+
+# Real, unrelated disposable session + a deliberately stale birth marker.
+# This exercises authorization without forcing global PID reuse.
+setsid sh -c '
+    outfile=$1
+    IFS= read -r stat < /proc/self/stat || exit 1
+    pid=${stat%% *}; rest=${stat##*) }; set -- $rest
+    [ "$3" = "$pid" ] && [ "$4" = "$pid" ] || exit 1
+    printf "%s %s\n" "$pid" "${20}" > "$outfile"
+    exec sleep 40
+' fixture "$tmp/sentinel" >/dev/null 2>&1 &
+sentinel_launcher=$!
+start=$(date +%s)
+while [ ! -s "$tmp/sentinel" ]; do
+    [ "$(( $(date +%s) - start ))" -lt 6 ] || { echo 'FAIL sentinel startup' >&2; exit 1; }
+    sleep 0.1 2>/dev/null || sleep 1
+done
+read -r sentinel birth < "$tmp/sentinel"
+case "$sentinel:$birth" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+[ "$sentinel" -gt 1 ] && [ "$birth" -gt 0 ] || exit 1
+mkdir "$tmp/bin"
+cat > "$tmp/bin/setsid" <<'SH'
+#!/bin/sh
+[ "$4" = b5 ] || exit 19
+printf '%s\n' "$6" > "$DEADLINE_FAKE_DIR"
+if [ "$DEADLINE_FAKE_MODE" = missing ]; then exit 19; fi
+printf '%s 0\n' "$DEADLINE_SENTINEL" > "$6/pid"
+if [ "$7" = fifo ]; then printf 'pid\n' >&8; fi
+SH
+chmod +x "$tmp/bin/setsid"
+set +e
+out=$(PATH="$tmp/bin:$PATH" DEADLINE_FAKE_MODE=stale DEADLINE_FAKE_DIR="$tmp/fake-dir" \
+    DEADLINE_SENTINEL="$sentinel" sh "$worker" watchdog-check-bounded 3)
+rc=$?
+set -e
+sentinel_alive=0
+if IFS= read -r stat < "/proc/$sentinel/stat" 2>/dev/null; then
+    rest=${stat##*) }; set -- $rest
+    if [ "$3" = "$sentinel" ] && [ "$4" = "$sentinel" ] &&
+       [ "${20}" = "$birth" ] && [ "$1" != Z ]; then
+        sentinel_alive=1
+        kill -TERM "$sentinel" 2>/dev/null || :
+    fi
+fi
+wait "$sentinel_launcher" 2>/dev/null || :
+[ "$rc" -eq 2 ] && [ "$out" = 'WATCHDOG state=UNKNOWN reason=probe_isolation_unverified' ] &&
+    [ "$sentinel_alive" -eq 1 ] && [ ! -e "$(cat "$tmp/fake-dir")" ] || {
+    echo "FAIL stale_identity rc=$rc alive=$sentinel_alive out=$out" >&2; exit 1;
+}
+passed=$((passed + 1))
+echo 'PASS stale_identity_no_signal'
+
+# Failed startup before arming must clean its private resources.
+set +e
+out=$(PATH="$tmp/bin:$PATH" DEADLINE_FAKE_MODE=missing DEADLINE_FAKE_DIR="$tmp/fake-dir" \
+    sh "$worker" watchdog-check-bounded 3)
+rc=$?
+set -e
+[ "$rc" -eq 2 ] && [ "$out" = 'WATCHDOG state=UNKNOWN reason=probe_start_unverified' ] &&
+    [ ! -e "$(cat "$tmp/fake-dir")" ] || {
+    echo "FAIL prearm_failure rc=$rc out=$out" >&2; exit 1;
+}
+passed=$((passed + 1))
+echo 'PASS prearm_failure_cleanup'
 printf 'PASS: %s B4 bounded cases\n' "$passed"
