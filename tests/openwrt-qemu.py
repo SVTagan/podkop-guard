@@ -47,10 +47,12 @@ try:
         global serial
         serial += 1
         token = f"__PGVM_{serial:03d}__"
+        started = time.monotonic()
         child.sendline(f"{cmd}; x=$?; printf '\\n{token}=%s\\n' \"$x\"")
         child.expect(re.escape(token) + r"=(\d+)", timeout=timeout)
         rc = int(child.match.group(1))
         child.expect(prompt, timeout=30)
+        print(f"VM_COMMAND_TIMING serial={serial} elapsed_s={time.monotonic() - started:.2f} rc={rc}", flush=True)
         if rc:
             raise RuntimeError(f"VM command returned {rc}: {cmd}")
         return rc

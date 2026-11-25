@@ -16,11 +16,32 @@ case "$DEADLINE_FIXTURE" in
         wait ;;
     invalid) exit 19 ;;
     empty) : ;;
+    fd_isolation)
+        if [ "$DEADLINE_EXPECT_FIFO" = 1 ]; then
+            IFS= read -r stat < /proc/self/stat || exit 19
+            rest=${stat##*) }
+            set -- $rest
+            parent=$2
+            # The isolated session leader owns the wake channels, but the
+            # actual diagnostic subprocess must not inherit them.
+            [ -p "/proc/$parent/fd/8" ] && [ -p "/proc/$parent/fd/9" ] &&
+                [ ! -e /proc/self/fd/8 ] && [ ! -e /proc/self/fd/9 ] || exit 19
+        fi
+        echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' ;;
 esac
 SH
 chmod +x "$tmp/check"
 export PODKOP_GUARD_WATCH_CHECK_SCRIPT="$tmp/check"
 export DEADLINE_CHILD_PID_FILE="$tmp/childpid"
+DEADLINE_EXPECT_FIFO=0
+if command -v mkfifo >/dev/null 2>&1 &&
+   (IFS= read -r -t 1 wake 2>/dev/null <<'PG_TIMED_READ'
+ready
+PG_TIMED_READ
+    [ "$wake" = ready ]); then
+    DEADLINE_EXPECT_FIFO=1
+fi
+export DEADLINE_EXPECT_FIFO
 passed=0
 verify() {
     name=$1 expected=$2 rc_expected=$3
@@ -36,10 +57,13 @@ verify() {
     passed=$((passed + 1))
     printf 'PASS %s\n' "$name"
 }
+quick_start=$(date +%s)
 verify healthy 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' 0 healthy
 verify suspect 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=123 dns=timeout nft=present' 1 suspect
 verify invalid_exit 'WATCHDOG state=UNKNOWN reason=probe_invalid_exit' 2 invalid
 verify empty_output 'WATCHDOG state=UNKNOWN reason=probe_empty_output' 2 empty
+verify fd_isolation 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' 0 fd_isolation
+printf 'TIMING quick_probes=5 elapsed_s=%s fifo=%s\n' "$(( $(date +%s) - quick_start ))" "$DEADLINE_EXPECT_FIFO"
 deadline_start=$(date +%s)
 verify hard_deadline 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline' 2 hung
 deadline_elapsed=$(( $(date +%s) - deadline_start ))

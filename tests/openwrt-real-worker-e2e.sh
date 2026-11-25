@@ -173,13 +173,24 @@ echo PASS_VM_REAL_WORKER_OBSERVE_ONLY
 
 # B3: deterministic local-fault fixtures under REAL OpenWrt BusyBox ash.
 # No WAN, VPN, real DNS or service restarts are involved.
-sh /mnt/pg-bundle/watchdog-check.sh /usr/bin/podkop-guard > /tmp/pg-b3-watch-tests
+# Emit actual per-suite timings and full test diagnostics, including failures.
+run_watch_suite() {
+    local name log started rc
+    name=$1; log=$2; started=$(date +%s); rc=0
+    sh "/mnt/pg-bundle/$name" /usr/bin/podkop-guard > "$log" 2>&1 || rc=$?
+    cat "$log"
+    printf 'VM_WATCH_TIMING suite=%s elapsed_s=%s rc=%s\n' "$name" "$(( $(date +%s) - started ))" "$rc"
+    [ "$rc" -eq 0 ]
+}
+run_watch_suite watchdog-check.sh /tmp/pg-b3-watch-tests
 grep -Fq 'observer-only scenarios' /tmp/pg-b3-watch-tests
-sh /mnt/pg-bundle/watchdog-monitor.sh /usr/bin/podkop-guard > /tmp/pg-b3-monitor-tests
+run_watch_suite watchdog-monitor.sh /tmp/pg-b3-monitor-tests
 grep -Fq 'deterministic monitor scenarios' /tmp/pg-b3-monitor-tests
 echo PASS_VM_B3_LOCAL_NEGATIVE_FIXTURES
-sh /mnt/pg-bundle/watchdog-deadline.sh /usr/bin/podkop-guard > /tmp/pg-b4-deadline
+run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
+grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline
+grep -Eq '^TIMING quick_probes=5 elapsed_s=[0-9]+ fifo=1$' /tmp/pg-b4-deadline
 grep -Fq 'signal_KILL_no_running_orphan' /tmp/pg-b4-deadline
 echo PASS_VM_B4_ISOLATED_DEADLINE
 grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
