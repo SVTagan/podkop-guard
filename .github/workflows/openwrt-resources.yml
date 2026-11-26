@@ -34,7 +34,7 @@ jobs:
       - name: Install isolated QEMU test dependencies
         run: |
           sudo apt-get -qq update
-          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect e2fsprogs gcc musl-tools
+          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect e2fsprogs zstd binutils
       - name: Download official OpenWrt ${{ matrix.release }} (x86_64 BIOS ext4)
         env:
           VM_RELEASE: ${{ matrix.release }}
@@ -64,12 +64,23 @@ jobs:
       - name: Compile and preflight laboratory meter
         run: |
           set -eu
-          # The default qemu64 CPU lacks some modern host libc instructions.
-          # Keep guest CPU unchanged; use a baseline static musl executable.
-          musl-gcc -O2 -Wall -Wextra -Werror -march=x86-64 -mtune=generic -static tests/resource-meter.c -o resource-meter
+          # Use the same official OpenWrt target toolchain in both matrix jobs.
+          # Host libc/compiler flags alone did not establish qemu64 compatibility.
+          toolchain=openwrt-toolchain-24.10.5-x86-64_gcc-13.3.0_musl.Linux-x86_64
+          curl -fL --retry 3 "https://downloads.openwrt.org/releases/24.10.5/targets/x86/64/$toolchain.tar.zst" -o toolchain.tar.zst
+          printf '%s  toolchain.tar.zst\n' 25d4af62a9c445aab876cbc0fc764603bbb681386370ac06371f86da91a2b721 | sha256sum -c -
+          tar --zstd -xf toolchain.tar.zst
+          export STAGING_DIR="$PWD/$toolchain/toolchain-x86_64_gcc-13.3.0_musl"
+          export GCC_HONOUR_COPTS=0
+          cc="$STAGING_DIR/bin/x86_64-openwrt-linux-musl-gcc"
+          test -x "$cc"
+          "$cc" --version
+          "$cc" -g -O2 -Wall -Wextra -Werror -march=x86-64 -mtune=generic -static -fno-pie -no-pie tests/resource-meter.c -o resource-meter
           file resource-meter
           sha256sum resource-meter
-          readelf -h resource-meter
+          readelf -h resource-meter > meter-header.log
+          cat meter-header.log
+          grep -Eq 'Type:[[:space:]]+EXEC' meter-header.log
           readelf -l resource-meter > meter-elf.log
           if grep -q INTERP meter-elf.log; then echo 'FAIL_RESOURCE_METER_DYNAMIC' >&2; exit 1; fi
           ./resource-meter sh -c 'sleep 0.1; (sleep 0.1)& wait' > meter-selftest.log
@@ -94,4 +105,17 @@ jobs:
         env:
           VM_RELEASE: ${{ matrix.release }}
         run: |
-          /usr/bin/python3 tests/openwrt-qemu.py openwrt.img "$VM_RELEASE" resources
+          set -o pipefail
+          rc=0
+          /usr/bin/python3 tests/openwrt-qemu.py openwrt.img "$VM_RELEASE" resources 2>&1 | tee resource-serial.log || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            # Fixed-address static ELF: report the actual fault instruction
+            # from this very binary, not a reconstruction on another host.
+            sed -nE 's/.*resource-meter.*trap invalid opcode ip:([[:xdigit:]]+).*/\1/p' resource-serial.log | sort -u > meter-fault-ips.log
+            while IFS= read -r ip; do
+              echo "RESOURCE_METER_FAULT_IP=0x$ip"
+              addr2line -f -C -e resource-meter "0x$ip" || :
+              objdump -d --start-address="0x$ip" --stop-address="$((16#$ip + 32))" resource-meter || :
+            done < meter-fault-ips.log
+          fi
+          exit "$rc"
