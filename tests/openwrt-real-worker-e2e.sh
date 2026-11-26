@@ -4,8 +4,9 @@
 set -eu
 . /mnt/pg-bundle/openwrt-vm-common.sh
 
-# Both serial phases run in the same disposable guest. The B6 suite must
-# inherit the completed core fixture, not recreate or repair its state.
+# All serial phases run in the same disposable guest. Each phase must
+# inherit the completed preceding fixture, not recreate or repair its state.
+fixture_manifest=/tmp/pg-worker-fixtures.sha256
 boundary_manifest=/tmp/pg-worker-b6.sha256
 verify_split_boundary() {
     local service raw
@@ -18,8 +19,8 @@ verify_split_boundary() {
     if pidof sing-box >/dev/null 2>&1; then
         echo FAIL_VM_SPLIT_SING_BOX_ALIVE >&2; return 1
     fi
-    [ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ]
-    [ ! -e /var/run/podkop_list_update.pid ] && [ ! -L /var/run/podkop_list_update.pid ]
+    [ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ] || return 1
+    [ ! -e /var/run/podkop_list_update.pid ] && [ ! -L /var/run/podkop_list_update.pid ] || return 1
     [ ! -e /tmp/podkop-guard-probe.lock/active ]
     [ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ]
     [ -f /tmp/podkop-guard-probe.lock/lease ]
@@ -28,14 +29,83 @@ verify_split_boundary() {
         flock -n 7
     )
 }
+run_watch_suite() {
+    local name log started rc
+    name=$1; log=$2; started=$(date +%s); rc=0
+    sh "/mnt/pg-bundle/$name" /usr/bin/podkop-guard > "$log" 2>&1 || rc=$?
+    cat "$log"
+    printf 'VM_WATCH_TIMING suite=%s elapsed_s=%s rc=%s\n' "$name" "$(( $(date +%s) - started ))" "$rc"
+    [ "$rc" -eq 0 ]
+}
+
+run_runtime_phase() {
+    verify_split_boundary
+    [ ! -e "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ] || return 1
+    [ -f "$fixture_manifest" ] && [ ! -L "$fixture_manifest" ] || return 1
+    sha256sum -c "$fixture_manifest"
+    echo PASS_VM_WORKER_RUNTIME_PRECONDITIONS
+
+    run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
+    grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
+    grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline
+    grep -Eq '^TIMING quick_probes=5 elapsed_s=[0-9]+ fifo=1$' /tmp/pg-b4-deadline
+    grep -Fq 'signal_KILL_no_running_orphan' /tmp/pg-b4-deadline
+    for marker in background_result_no_running_orphan leader_gone_no_running_orphan guard_gone_no_running_orphan stale_identity_no_signal prearm_failure_cleanup; do
+        grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+    done
+    echo PASS_VM_B5_SESSION_LIFECYCLE
+    for marker in actual_prearm_TERM_cleanup actual_prearm_KILL_cleanup actual_active_TERM_cleanup actual_active_KILL_cleanup; do
+        grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+    done
+    echo PASS_VM_B5_ACTUAL_CONTROLLER
+    for marker in supervisors_stopped_unknown_bounded supervisors_resumed_cleanup supervisors_lost_unknown_bounded supervisors_lost_test_only_cleanup cpu_contention_unknown_cleanup; do
+        grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+    done
+    echo PASS_VM_B5_SUPERVISOR_LOSS
+    for marker in supervisors_stopped_reentry_blocked supervisors_lost_reentry_blocked supervisors_stopped_reentry_released supervisors_lost_reentry_released; do
+        grep -Fq "PASS $marker" /tmp/pg-b4-deadline
+    done
+    echo PASS_VM_B5_PROBE_CONTAINMENT
+    for marker in flock_missing_no_start flock_error_no_start armed_absent_blocked armed_malformed_blocked live_session_without_lease_blocked no_lease_session_reclaimed concurrent_start_single_winner; do
+        grep -Fxq "PASS $marker" /tmp/pg-b4-deadline
+    done
+    echo PASS_VM_B5_CONTAINMENT_EDGE_CASES
+    echo PASS_VM_B4_ISOLATED_DEADLINE
+    grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
+    grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests
+    # The default OpenWrt BusyBox may not support fractional sleep.
+    if grep -Fq 'sleep: invalid number' /tmp/pg-b3-monitor-tests; then
+        echo FAIL_VM_B4_FRACTIONAL_SLEEP >&2; exit 1
+    fi
+    echo PASS_VM_B4_RESIDENT_BOUNDED
+
+    # B5.2c.2: destructive lifecycle tests only inside this disposable guest.
+    PG_DISPOSABLE_VM=1 sh /mnt/pg-bundle/openwrt-procd-lifecycle-e2e.sh
+
+
+    # The next serial command uses the exact same guest and worker, but a
+    # separate bounded timeout. Preserve the LKG baseline across the split.
+    verify_split_boundary
+    sha256sum /usr/bin/podkop-guard /etc/podkop-guard/lkg-marker \
+        /etc/podkop-guard/lkg.srs /etc/podkop-guard/lkg-subnets.lst > "$boundary_manifest"
+    rm -f "$fixture_manifest"
+    echo PASS_VM_B6_SPLIT_CORE_PRECONDITIONS
+    echo OPENWRT_REAL_WORKER_CORE_E2E_PASS
+}
+
 case "$#" in 1) ;; *) echo 'FAIL VM worker phase required' >&2; exit 1 ;; esac
 case "$1" in
     core)
-        [ ! -e "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ]
+        [ ! -e "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ] || exit 1
+        [ ! -e "$fixture_manifest" ] && [ ! -L "$fixture_manifest" ] || exit 1
         ;;
+    runtime)
+        run_runtime_phase
+        exit 0 ;;
     finalize)
+        [ ! -e "$fixture_manifest" ] && [ ! -L "$fixture_manifest" ] || exit 1
         verify_split_boundary
-        [ -f "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ]
+        [ -f "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ] || exit 1
         sha256sum -c "$boundary_manifest"
         echo PASS_VM_B6_SPLIT_FINAL_PRECONDITIONS
         # The real LKG daemon starts with default 300s startup grace. It must remain
@@ -235,14 +305,6 @@ echo PASS_VM_REAL_WORKER_OBSERVE_ONLY
 # B3: deterministic local-fault fixtures under REAL OpenWrt BusyBox ash.
 # No WAN, VPN, real DNS or service restarts are involved.
 # Emit actual per-suite timings and full test diagnostics, including failures.
-run_watch_suite() {
-    local name log started rc
-    name=$1; log=$2; started=$(date +%s); rc=0
-    sh "/mnt/pg-bundle/$name" /usr/bin/podkop-guard > "$log" 2>&1 || rc=$?
-    cat "$log"
-    printf 'VM_WATCH_TIMING suite=%s elapsed_s=%s rc=%s\n' "$name" "$(( $(date +%s) - started ))" "$rc"
-    [ "$rc" -eq 0 ]
-}
 # Exercise the full procd event/snapshot fixture on actual guest jq/ash,
 # not just selected real procd RPCs. The fixture mocks ubus locally.
 run_watch_suite watchdog-procd.sh /tmp/pg-b6-procd-tests
@@ -305,48 +367,10 @@ for marker in config_changed config_rearmed config_missing config_invalid config
     grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
 done
 echo PASS_VM_B6_DNS_LAYOUT_FIXTURES
-run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
-grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
-grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline
-grep -Eq '^TIMING quick_probes=5 elapsed_s=[0-9]+ fifo=1$' /tmp/pg-b4-deadline
-grep -Fq 'signal_KILL_no_running_orphan' /tmp/pg-b4-deadline
-for marker in background_result_no_running_orphan leader_gone_no_running_orphan guard_gone_no_running_orphan stale_identity_no_signal prearm_failure_cleanup; do
-    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
-done
-echo PASS_VM_B5_SESSION_LIFECYCLE
-for marker in actual_prearm_TERM_cleanup actual_prearm_KILL_cleanup actual_active_TERM_cleanup actual_active_KILL_cleanup; do
-    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
-done
-echo PASS_VM_B5_ACTUAL_CONTROLLER
-for marker in supervisors_stopped_unknown_bounded supervisors_resumed_cleanup supervisors_lost_unknown_bounded supervisors_lost_test_only_cleanup cpu_contention_unknown_cleanup; do
-    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
-done
-echo PASS_VM_B5_SUPERVISOR_LOSS
-for marker in supervisors_stopped_reentry_blocked supervisors_lost_reentry_blocked supervisors_stopped_reentry_released supervisors_lost_reentry_released; do
-    grep -Fq "PASS $marker" /tmp/pg-b4-deadline
-done
-echo PASS_VM_B5_PROBE_CONTAINMENT
-for marker in flock_missing_no_start flock_error_no_start armed_absent_blocked armed_malformed_blocked live_session_without_lease_blocked no_lease_session_reclaimed concurrent_start_single_winner; do
-    grep -Fxq "PASS $marker" /tmp/pg-b4-deadline
-done
-echo PASS_VM_B5_CONTAINMENT_EDGE_CASES
-echo PASS_VM_B4_ISOLATED_DEADLINE
-grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
-grep -Fq 'deadline_no_running_orphan' /tmp/pg-b3-monitor-tests
-# The default OpenWrt BusyBox may not support fractional sleep.
-if grep -Fq 'sleep: invalid number' /tmp/pg-b3-monitor-tests; then
-    echo FAIL_VM_B4_FRACTIONAL_SLEEP >&2; exit 1
-fi
-echo PASS_VM_B4_RESIDENT_BOUNDED
-
-# B5.2c.2: destructive lifecycle tests only inside this disposable guest.
-PG_DISPOSABLE_VM=1 sh /mnt/pg-bundle/openwrt-procd-lifecycle-e2e.sh
-
-
-# The next serial command uses the exact same guest and worker, but a
-# separate bounded timeout. Preserve the LKG baseline across the split.
+# Preserve the completed fixtures and the exact installed worker/LKG across
+# serial phases. A later phase must not recreate or repair their state.
 verify_split_boundary
 sha256sum /usr/bin/podkop-guard /etc/podkop-guard/lkg-marker \
-    /etc/podkop-guard/lkg.srs /etc/podkop-guard/lkg-subnets.lst > "$boundary_manifest"
-echo PASS_VM_B6_SPLIT_CORE_PRECONDITIONS
-echo OPENWRT_REAL_WORKER_CORE_E2E_PASS
+    /etc/podkop-guard/lkg.srs /etc/podkop-guard/lkg-subnets.lst \
+    /tmp/pg-b6-procd-tests /tmp/pg-b3-watch-tests /tmp/pg-b3-monitor-tests > "$fixture_manifest"
+echo PASS_VM_WORKER_FIXTURES_CHECKPOINT

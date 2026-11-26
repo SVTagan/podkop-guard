@@ -53,9 +53,25 @@ try:
         token = f"__PGVM_{serial:03d}__"
         started = time.monotonic()
         child.sendline(f"{cmd}; x=$?; printf '\\n{token}=%s\\n' \"$x\"")
-        child.expect(re.escape(token) + r"=(\d+)", timeout=timeout)
+        try:
+            child.expect(re.escape(token) + r"=(\d+)", timeout=timeout)
+        except pexpect.TIMEOUT:
+            print(
+                f"VM_COMMAND_TIMEOUT serial={serial} elapsed_s={time.monotonic() - started:.2f} "
+                f"budget_s={timeout} phase=completion_token command={cmd}",
+                flush=True,
+            )
+            raise
         rc = int(child.match.group(1))
-        child.expect(prompt, timeout=30)
+        try:
+            child.expect(prompt, timeout=30)
+        except pexpect.TIMEOUT:
+            print(
+                f"VM_COMMAND_TIMEOUT serial={serial} elapsed_s={time.monotonic() - started:.2f} "
+                f"budget_s=30 phase=prompt command={cmd}",
+                flush=True,
+            )
+            raise
         print(f"VM_COMMAND_TIMING serial={serial} elapsed_s={time.monotonic() - started:.2f} rc={rc}", flush=True)
         if rc:
             raise RuntimeError(f"VM command returned {rc}: {cmd}")
@@ -118,9 +134,12 @@ start_service() {
     print("QEMU_MULTI_SRS_CACHE_E2E_PASS", flush=True)
     run("test -r /mnt/pg-bundle/podkop-guard")
     run("test -r /mnt/pg-bundle/openwrt-real-worker-e2e.sh")
-    # Separate serial deadlines; keep the same guest, test order and
-    # workflow-level 12-minute job budget. No failure is ignored.
-    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh core", timeout=270)
+    # Separate setup/deterministic fixtures from deadline and real lifecycle
+    # tests. Preserve the same guest, test order and 12-minute job budget.
+    # No test is skipped or retried and all runtime probe deadlines are unchanged.
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh core", timeout=210)
+    print("QEMU_REAL_WORKER_FIXTURES_E2E_PASS", flush=True)
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh runtime", timeout=180)
     print("QEMU_REAL_WORKER_CORE_E2E_PASS", flush=True)
     run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-fakeip-e2e.sh", timeout=180)
     print("QEMU_REAL_B6_E2E_PASS", flush=True)
