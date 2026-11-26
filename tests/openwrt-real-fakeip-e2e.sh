@@ -250,6 +250,14 @@ jq -e '.nftables | type == "array" and (all(.[] | .set? | select(type == "object
 "$worker" watchdog-check > "$tmp/nft-real-ok.log" ||
     { cat "$tmp/nft-real-ok.log"; cat "$tmp/nft-terse.json"; fail nft_real_positive; }
 grep -Fq 'state=HEALTHY_SAMPLED ' "$tmp/nft-real-ok.log" || fail nft_real_positive_state
+# Separate, opt-in measurement workflow. The normal functional sequence
+# is unchanged and remains mandatory in the independent verification job.
+if [ "${PG_VM_RESOURCE_ONLY:-0}" = 1 ]; then
+    . /mnt/pg-bundle/openwrt-resource-benchmark.sh
+    resource_benchmark
+    sha256sum -c "$boundary_manifest"
+    exit 0
+fi
 # The running process retains its loaded config. Modify only our disk
 # fixture and prove the worker refuses to validate the stale layout.
 cp "$tmp/box.json" "$tmp/box.before"

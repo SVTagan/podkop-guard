@@ -9,9 +9,11 @@ import time
 
 import pexpect
 
-if len(sys.argv) != 3 or sys.argv[2] not in ("24.10.5", "25.12.6"):
-    raise SystemExit("usage: openwrt-qemu.py IMAGE {24.10.5|25.12.6}")
-image, release = sys.argv[1:]
+if (len(sys.argv) not in (3, 4) or sys.argv[2] not in ("24.10.5", "25.12.6")
+        or (len(sys.argv) == 4 and sys.argv[3] != "resources")):
+    raise SystemExit("usage: openwrt-qemu.py IMAGE {24.10.5|25.12.6} [resources]")
+image, release = sys.argv[1:3]
+resource_only = len(sys.argv) == 4
 pkg = {"24.10.5": "opkg", "25.12.6": "apk"}[release]
 vm_env = f"PG_DISPOSABLE_VM=1 PG_VM_RELEASE={release}"
 child = pexpect.spawn(
@@ -122,6 +124,19 @@ start_service() {
     # The host machine and user's AX6000 have no connection to these files.
     run("mkdir -p /mnt/pg-bundle")
     run("mount -t ext4 -o ro /dev/vdb /mnt/pg-bundle")
+    if resource_only:
+        run(f"{vm_env} sh /mnt/pg-bundle/openwrt-resource-setup.sh", timeout=180)
+        run(f"{vm_env} PG_VM_RESOURCE_ONLY=1 sh /mnt/pg-bundle/openwrt-real-fakeip-e2e.sh", timeout=240)
+        run("sha256sum -c /tmp/pg-worker-b6.sha256")
+        # procd service deletion may finish before the process has exited.
+        run("(i=0; while pidof sing-box >/dev/null 2>&1; do "
+            "test \"$i\" -lt 8 || exit 1; i=$((i + 1)); sleep 1; done; ! pidof sing-box)", timeout=15)
+        run("""ubus -t 3 call service list '{"name":"sing-box"}' | jq -e 'type == "object" and length == 0'""")
+        run("nft list tables > /tmp/pg-resource-tables && ! grep -Eq '^[[:space:]]*table inet PodkopTable[[:space:]]*$' /tmp/pg-resource-tables")
+        run("test ! -e /usr/bin/podkop && test ! -L /usr/bin/podkop && test ! -e /tmp/podkop-guard-probe.lock/active && test ! -e /tmp/podkop-guard-probe.lock/active.abandoned")
+        run("flock -n /tmp/podkop-guard-probe.lock/lease true")
+        print("QEMU_RESOURCE_BENCHMARK_PASS", flush=True)
+        sys.exit(0)
     run("test -r /mnt/pg-bundle/openwrt-installer-e2e.sh")
     run("test -r /mnt/pg-bundle/install.sh")
     run("test -r /mnt/pg-bundle/podkop-guard.init")

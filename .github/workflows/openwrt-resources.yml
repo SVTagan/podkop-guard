@@ -1,0 +1,90 @@
+name: OpenWrt resource baseline (24.10 and 25.12)
+
+on:
+  push:
+    branches:
+      - feature/watchdog-observe-only
+    paths:
+      - tests/resource-meter.c
+      - tests/openwrt-resource-setup.sh
+      - tests/openwrt-resource-benchmark.sh
+      - .github/workflows/openwrt-resources.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  openwrt:
+    name: Resource baseline OpenWrt ${{ matrix.release }} (${{ matrix.pkg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: '24.10.5'
+            pkg: opkg
+            sha256: '5b854a7a2909a0b21887ba9be773b0964eb28fef81d6b8399d32a0f270a5d8ff'
+          - release: '25.12.6'
+            pkg: apk
+            sha256: 'f8538784d0288b4133a99ac2a68443e4922ffde6343e80df56a5882364b9d499'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install isolated QEMU test dependencies
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect e2fsprogs gcc libc6-dev
+      - name: Download official OpenWrt ${{ matrix.release }} (x86_64 BIOS ext4)
+        env:
+          VM_RELEASE: ${{ matrix.release }}
+          VM_SHA256: ${{ matrix.sha256 }}
+        run: |
+          set -eu
+          curl -fL --retry 3 \
+            "https://downloads.openwrt.org/releases/$VM_RELEASE/targets/x86/64/openwrt-$VM_RELEASE-x86-64-generic-ext4-combined.img.gz" \
+            -o openwrt.img.gz
+          printf '%s  openwrt.img.gz\n' "$VM_SHA256" | sha256sum -c -
+          # OpenWrt 24.10.5 appends fwtool metadata after the gzip stream.
+          # Accept only the known warning on the already SHA256-verified
+          # pinned image; never suppress CRC errors or truncated streams.
+          rc=0
+          LC_ALL=C gzip -dc openwrt.img.gz > openwrt.img 2> gzip.log || rc=$?
+          cat gzip.log >&2
+          if [ "$rc" -ne 0 ]; then
+            if [ "$VM_RELEASE" = 24.10.5 ] &&
+               [ "$rc" -eq 2 ] &&
+               [ "$(sed '/^[[:space:]]*$/d' gzip.log)" = 'gzip: openwrt.img.gz: decompression OK, trailing garbage ignored' ]; then
+              echo 'PASS_KNOWN_OPENWRT_GZIP_METADATA_WARNING'
+            else
+              exit "$rc"
+            fi
+          fi
+          test -s openwrt.img
+      - name: Compile and preflight laboratory meter
+        run: |
+          set -eu
+          gcc -O2 -Wall -Wextra -Werror -static tests/resource-meter.c -o resource-meter
+          ./resource-meter sh -c 'sleep 0.1; (sleep 0.1)& wait' > meter-selftest.log
+          grep -q '^PG_RESOURCE .*rc=0$' meter-selftest.log
+          rc=0
+          ./resource-meter sh -c 'sleep 0.1; exit 2' > meter-negative.log || rc=$?
+          test "$rc" -eq 2
+          grep -q '^PG_RESOURCE .*rc=2$' meter-negative.log
+          python3 -m py_compile tests/openwrt-qemu.py
+          sh -n tests/openwrt-resource-setup.sh
+          sh -n tests/openwrt-resource-benchmark.sh
+          sh -n tests/openwrt-real-fakeip-e2e.sh
+      - name: Create isolated read-only resource fixture
+        run: |
+          set -eu
+          mkdir vm-input
+          cp podkop-guard resource-meter tests/openwrt-vm-common.sh tests/openwrt-real-fakeip-e2e.sh vm-input/
+          cp tests/openwrt-resource-setup.sh tests/openwrt-resource-benchmark.sh vm-input/
+          truncate -s 16M openwrt-test-bundle.img
+          mkfs.ext4 -F -q -d vm-input openwrt-test-bundle.img
+      - name: Measure resource usage inside disposable OpenWrt
+        env:
+          VM_RELEASE: ${{ matrix.release }}
+        run: |
+          /usr/bin/python3 tests/openwrt-qemu.py openwrt.img "$VM_RELEASE" resources
