@@ -6,6 +6,22 @@ set -eu
 [ ! -e /etc/podkop-guard ] && [ ! -L /etc/podkop-guard ] || exit 1
 [ ! -e /tmp/podkop-guard-probe.lock ] && [ ! -L /tmp/podkop-guard-probe.lock ] || exit 1
 [ ! -e /tmp/pg-worker-b6.sha256 ] && [ ! -L /tmp/pg-worker-b6.sha256 ] || exit 1
+# Execute the actual bundled meter on the guest CPU before installing packages.
+# Host-only compilation/smoke tests cannot establish guest ISA compatibility.
+meter=/mnt/pg-bundle/resource-meter
+[ -x "$meter" ] || exit 1
+for expected_rc in 0 2; do
+    rc=0
+    "$meter" /bin/sh -c 'sleep 1; exit "$1"' pg-meter-smoke "$expected_rc" > /tmp/pg-resource-meter-smoke.log 2>&1 || rc=$?
+    cat /tmp/pg-resource-meter-smoke.log
+    if [ "$rc" -ne "$expected_rc" ] ||
+       ! grep -Eq "^PG_RESOURCE .*rc=$expected_rc$" /tmp/pg-resource-meter-smoke.log; then
+        printf 'FAIL_VM_RESOURCE_METER_PREFLIGHT expected_rc=%s actual_rc=%s\n' "$expected_rc" "$rc" >&2
+        exit 1
+    fi
+done
+rm -f /tmp/pg-resource-meter-smoke.log
+echo PASS_VM_RESOURCE_METER_PREFLIGHT
 guest_if=br-lan
 ip link show "$guest_if" >/dev/null 2>&1 || guest_if=eth0
 ip link set "$guest_if" up

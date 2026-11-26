@@ -34,7 +34,7 @@ jobs:
       - name: Install isolated QEMU test dependencies
         run: |
           sudo apt-get -qq update
-          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect e2fsprogs gcc libc6-dev
+          sudo apt-get -qq install -y qemu-system-x86 python3-pexpect e2fsprogs gcc musl-tools
       - name: Download official OpenWrt ${{ matrix.release }} (x86_64 BIOS ext4)
         env:
           VM_RELEASE: ${{ matrix.release }}
@@ -64,7 +64,14 @@ jobs:
       - name: Compile and preflight laboratory meter
         run: |
           set -eu
-          gcc -O2 -Wall -Wextra -Werror -static tests/resource-meter.c -o resource-meter
+          # The default qemu64 CPU lacks some modern host libc instructions.
+          # Keep guest CPU unchanged; use a baseline static musl executable.
+          musl-gcc -O2 -Wall -Wextra -Werror -march=x86-64 -mtune=generic -static tests/resource-meter.c -o resource-meter
+          file resource-meter
+          sha256sum resource-meter
+          readelf -h resource-meter
+          readelf -l resource-meter > meter-elf.log
+          if grep -q INTERP meter-elf.log; then echo 'FAIL_RESOURCE_METER_DYNAMIC' >&2; exit 1; fi
           ./resource-meter sh -c 'sleep 0.1; (sleep 0.1)& wait' > meter-selftest.log
           grep -q '^PG_RESOURCE .*rc=0$' meter-selftest.log
           rc=0
