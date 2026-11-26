@@ -964,6 +964,19 @@ watch_nft_table() {
     fi
 }
 
+# A missing or unreadable Podkop table cannot establish a valid local DNS
+# sample. Keep the existing inactive/maintenance decisions separate.
+watch_nft_require_present() {
+    local reason
+    case "$WATCH_NFT" in
+        present) return 0 ;;
+        absent) reason=nft_table_absent ;;
+        *) reason=nft_table_unavailable ;;
+    esac
+    printf 'WATCHDOG state=UNKNOWN reason=%s pid=%s dns=%s nft=%s\n' "$reason" "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
+    return 1
+}
+
 # Check the answer section, never the nslookup 'Server' banner. This probe is
 # entirely local and should not depend on the selected VPN or external DNS.
 watch_fakeip() {
@@ -1160,6 +1173,8 @@ watchdog_check() {
         return 0
     fi
 
+    watch_nft_require_present || return 2
+
     # This initial probe deliberately supports only the observed Podkop FakeIP
     # inbound. Other DNS layouts must not be declared broken.
     if [ -n "$PODKOP_GUARD_WATCH_CONFIG" ]; then
@@ -1230,6 +1245,10 @@ watchdog_check() {
     watch_runtime_bus_verify "$check_bus"
     rc=$?
     case "$rc" in 1) return 0 ;; 2) return 2 ;; esac
+    # Invalidate both success and timeout if table evidence disappears during
+    # the sample. This checks presence only, not ruleset identity or contents.
+    watch_nft_table
+    watch_nft_require_present || return 2
     if [ "$WATCH_DNS" = "fakeip" ] && [ "$WATCH_NFT" = "present" ]; then
         printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present loopback=%s birth=%s bus=%s command_id=%s\n' "$WATCH_PID" "$WATCH_LOOPBACK" "$check_birth" "$check_bus" "$command_id"
         return 0

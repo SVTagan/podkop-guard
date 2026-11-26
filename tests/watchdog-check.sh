@@ -63,6 +63,12 @@ case "$WATCH_TEST_NFT" in
     present) printf 'table inet PodkopTable\n' ;;
     absent) printf 'table inet fw4\n' ;;
     error) exit 1 ;;
+    absent_after_dns)
+        if [ -e "$WATCH_TEST_DNS_CALLED" ]; then printf 'table inet fw4\n'
+        else printf 'table inet PodkopTable\n'; fi ;;
+    error_after_dns)
+        [ ! -e "$WATCH_TEST_DNS_CALLED" ] || exit 1
+        printf 'table inet PodkopTable\n' ;;
     *) exit 9 ;;
 esac
 SH
@@ -188,6 +194,26 @@ case_run() {
             esac ;;
     esac
     case "$name" in
+        nft_missing|nft_missing_timeout)
+            case "$output" in *'reason=nft_table_absent '*'dns=skipped nft=absent') ;; *)
+                echo "FAIL $name: missing table not rejected: $output" >&2; exit 1 ;;
+            esac
+            [ ! -e "$tmp/dns-called" ] || { echo "FAIL $name: DNS ran without table" >&2; exit 1; } ;;
+        nft_unavailable|nft_unavailable_timeout)
+            case "$output" in *'reason=nft_table_unavailable '*'dns=skipped nft=unknown') ;; *)
+                echo "FAIL $name: unreadable table not rejected: $output" >&2; exit 1 ;;
+            esac
+            [ ! -e "$tmp/dns-called" ] || { echo "FAIL $name: DNS ran without table evidence" >&2; exit 1; } ;;
+        nft_lost_during_*)
+            case "$output" in *'reason=nft_table_absent '*'nft=absent') ;; *)
+                echo "FAIL $name: stale table evidence: $output" >&2; exit 1 ;;
+            esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        nft_error_during_*)
+            case "$output" in *'reason=nft_table_unavailable '*'nft=unknown') ;; *)
+                echo "FAIL $name: stale table evidence: $output" >&2; exit 1 ;;
+            esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
         conntrack_unavailable|conntrack_invalid)
             case "$output" in *'reason=conntrack_unverified '*) ;; *)
                 echo "FAIL $name: missing unverified reason $output" >&2; exit 1 ;;
@@ -259,6 +285,12 @@ case_run no_process       UNKNOWN                 2 healthy   present none  fals
 case_run manual_stop      INACTIVE                0 healthy   absent  none  false 1 valid up
 case_run nft_missing      UNKNOWN                 2 healthy   absent  12345 true  0 valid up
 case_run nft_unavailable  UNKNOWN                 2 healthy   error   12345 true  0 valid up
+case_run nft_missing_timeout UNKNOWN              2 timeout   absent 12345 true 0 valid up
+case_run nft_unavailable_timeout UNKNOWN          2 timeout   error 12345 true 0 valid up
+case_run nft_lost_during_success UNKNOWN           2 healthy   absent_after_dns 12345 true 0 valid up
+case_run nft_lost_during_timeout UNKNOWN           2 timeout   absent_after_dns 12345 true 0 valid up
+case_run nft_error_during_success UNKNOWN          2 healthy   error_after_dns 12345 true 0 valid up
+case_run nft_error_during_timeout UNKNOWN          2 timeout   error_after_dns 12345 true 0 valid up
 case_run procd_error      UNKNOWN                 2 healthy   present 12345 true  0 valid down
 case_run unsupported_cfg  UNKNOWN                 2 healthy   present 12345 true  0 bad   up
 
