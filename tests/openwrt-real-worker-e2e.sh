@@ -186,6 +186,11 @@ run_watch_suite() {
     printf 'VM_WATCH_TIMING suite=%s elapsed_s=%s rc=%s\n' "$name" "$(( $(date +%s) - started ))" "$rc"
     [ "$rc" -eq 0 ]
 }
+# Exercise the full procd event/snapshot fixture on actual guest jq/ash,
+# not just selected real procd RPCs. The fixture mocks ubus locally.
+run_watch_suite watchdog-procd.sh /tmp/pg-b6-procd-tests
+grep -Eq '^PASS: [0-9]+ procd event/snapshot scenarios, all observe-only$' /tmp/pg-b6-procd-tests
+echo PASS_VM_B6_PROCD_FULL_FIXTURES
 run_watch_suite watchdog-check.sh /tmp/pg-b3-watch-tests
 grep -Fq 'observer-only scenarios' /tmp/pg-b3-watch-tests
 run_watch_suite watchdog-monitor.sh /tmp/pg-b3-monitor-tests
