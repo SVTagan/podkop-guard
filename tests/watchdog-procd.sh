@@ -67,10 +67,10 @@ snapshot_case() {
 }
 snapshot_case active 'PROCD_SNAPSHOT state=RUNNING pid=24430 action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","run"]}}}}' ok
 snapshot_case exited 'PROCD_SNAPSHOT state=STOPPED exit_code=1 reason=undetermined action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":false,"exit_code":1,"command":["/usr/bin/sing-box","run"]}}}}' ok
-snapshot_case missing_exit 'PROCD_SNAPSHOT state=STOPPED exit_code=unknown reason=undetermined action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":false,"command":["/usr/bin/sing-box"]}}}}' ok
+snapshot_case missing_exit 'PROCD_SNAPSHOT state=STOPPED exit_code=unknown reason=undetermined action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":false,"command":["/usr/bin/sing-box","run"]}}}}' ok
 snapshot_case missing_instance 'PROCD_SNAPSHOT state=UNREGISTERED reason=not_listed action=none' '{"sing-box":{"instances":{}}}' ok
 snapshot_case missing_service 'PROCD_SNAPSHOT state=UNREGISTERED reason=not_listed action=none' '{}' ok
-snapshot_case false_running 'PROCD_SNAPSHOT state=UNKNOWN reason=incomplete_instance action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"command":["/usr/bin/sing-box"]}}}}' ok
+snapshot_case false_running 'PROCD_SNAPSHOT state=UNKNOWN reason=incomplete_instance action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"command":["/usr/bin/sing-box","run"]}}}}' ok
 snapshot_case wrong_process 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":1,"command":["/tmp/sing-box-validator"]}}}}' ok
 snapshot_case bus_error 'PROCD_SNAPSHOT state=UNKNOWN reason=ubus_unavailable action=none' '{}' fail
 snapshot_case invalid_reply 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_json action=none' '{' ok
@@ -84,6 +84,9 @@ snapshot_case malformed_instance 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_in
 snapshot_case multi_reply 'PROCD_SNAPSHOT state=UNKNOWN reason=invalid_reply action=none' '{} {}' ok
 snapshot_case wrong_operation 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","check"]}}}}' ok
 snapshot_case stopped_with_pid 'PROCD_SNAPSHOT state=UNKNOWN reason=incomplete_instance action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":false,"pid":24430,"command":["/usr/bin/sing-box","run"]}}}}' ok
+# A complete run command is required independently of exit metadata.
+snapshot_case stopped_missing_operation 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":false,"command":["/usr/bin/sing-box"]}}}}' ok
+snapshot_case running_missing_operation 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box"]}}}}' ok
 # Disallow arguments that could accidentally request service actions.
 for cmd in watchdog-procd-event watchdog-procd-snapshot; do
     set +e
