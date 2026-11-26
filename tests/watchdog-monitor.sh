@@ -19,7 +19,7 @@ line=$(sed -n "${counter}p" "$MONITOR_TEST_FIXTURE")
 [ -n "$line" ] || exit 9
 oldifs=$IFS
 IFS='|'
-read -r state pid rc simulated_uptime reason birth bus <<EOF
+read -r state pid rc simulated_uptime reason birth bus command_id <<EOF
 $line
 EOF
 IFS=$oldifs
@@ -34,6 +34,7 @@ if [ "$state" = HANG ]; then
 fi
 birth=${birth:-1000}
 bus=${bus:-700:2000}
+command_id=${command_id:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 suffix=
 if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
     if [ "$state" = HEALTHY_SAMPLED ] &&
@@ -41,7 +42,7 @@ if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
         suffix=' loopback=ok'
     fi
     if [ "$state" = SUSPECT_DNS_TIMEOUT ] &&
-       [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID:-}" = "$pid:$birth:$bus" ]; then
+       [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID:-}" = "$pid:$birth:$bus:$command_id" ]; then
         state=UNKNOWN
         rc=2
         suffix=' reason=loopback_unresponsive'
@@ -50,6 +51,7 @@ fi
 if [ -n "$reason" ]; then suffix="$suffix reason=$reason"; fi
 [ "$birth" = - ] || suffix="$suffix birth=$birth"
 [ "$bus" = - ] || suffix="$suffix bus=$bus"
+[ "$command_id" = - ] || suffix="$suffix command_id=$command_id"
 printf 'WATCHDOG state=%s pid=%s mock=yes%s\n' "$state" "$pid" "$suffix"
 exit "$rc"
 SH
@@ -98,6 +100,7 @@ run_case() {
            printf 'DIAG bounded rc=%s output=%s\n' "$diag_rc" "$diag" >&2
            exit 1 ;;
     esac
+    case "$output" in *'command_id='*) echo "FAIL $name leaked command identity" >&2; exit 1 ;; esac
     case "$output" in
         *"MONITOR_END completed=$# confirmations=$confirmations action=none"*) ;;
         *) printf 'FAIL %s: wrong confirmations:\n%s\n' "$name" "$output" >&2; exit 1 ;;
@@ -180,6 +183,22 @@ run_case birth_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT ph
     "$H" "$T_BIRTH"
 run_case bus_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
     "$H" "$T_BUS"
+unset MONITOR_TEST_CONTROL_MODE
+# Same PID, birth and bus do not make a changed command the same runtime.
+H_CMD='HEALTHY_SAMPLED|101|0|||1000|700:2000|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+T_CMD='SUSPECT_DNS_TIMEOUT|101|1|||1000|700:2000|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+run_case command_changed 'sample=5/5 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T" "$T_CMD" "$T_CMD" "$T_CMD"
+run_case command_rearmed 'sample=6/6 state=SUSPECT_DNS_TIMEOUT phase=CONFIRMED pid=101 streak=3' 1 \
+    "$H" "$T" "$H_CMD" "$T_CMD" "$T_CMD" "$T_CMD"
+run_case command_missing 'sample=4/4 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    'HEALTHY_SAMPLED|101|0|||1000|700:2000|-' "$T" "$T" "$T"
+run_case command_invalid 'sample=4/4 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    'HEALTHY_SAMPLED|101|0|||1000|700:2000|invalid' "$T" "$T" "$T"
+MONITOR_TEST_CONTROL_MODE=1
+export MONITOR_TEST_CONTROL_MODE
+run_case command_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T_CMD"
 unset MONITOR_TEST_CONTROL_MODE
 run_case late_probe_rejected 'reason=probe_late' 0 \
     "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"

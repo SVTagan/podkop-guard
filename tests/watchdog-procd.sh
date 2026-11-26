@@ -13,6 +13,19 @@ cat > "$tmp/bin/ubus" <<'SH'
     echo forbidden > "$PROCD_TEST_FORBIDDEN"; exit 9;
 }
 [ "$PROCD_TEST_UBUS" != fail ] || exit 1
+n=$(cat "$PROCD_TEST_COUNTER" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$PROCD_TEST_COUNTER"
+if [ "$n" -eq 2 ]; then
+    case "${PROCD_TEST_RACE:-}" in
+        registration) printf '{}\n'; exit 0 ;;
+        bus) printf '700:2001\n' > "$PODKOP_GUARD_PROCD_BUS_FILE" ;;
+        birth) sed 's/ 1000 0$/ 1001 0/' "$PODKOP_GUARD_WATCH_PROC_ROOT/24430/stat" > "$PODKOP_GUARD_WATCH_PROC_ROOT/newstat"
+            mv "$PODKOP_GUARD_WATCH_PROC_ROOT/newstat" "$PODKOP_GUARD_WATCH_PROC_ROOT/24430/stat" ;;
+        rpc) exit 1 ;;
+        argv) printf '/usr/bin/sing-box\000run\000-c\000/other.json\000' > "$PODKOP_GUARD_WATCH_PROC_ROOT/24430/cmdline" ;;
+    esac
+fi
 printf '%s\n' "$PROCD_TEST_REPLY"
 SH
 chmod +x "$tmp/bin/ubus"
@@ -27,6 +40,7 @@ printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/24430/cmdline"
   printf ' 1000 0\n'
 } > "$tmp/proc/24430/stat"
 export PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc"
+export PODKOP_GUARD_PROCD_BUS_FILE="$tmp/bus" PROCD_TEST_COUNTER="$tmp/count"
 passed=0
 event_case() {
     name=$1 expected=$2 input=$3
@@ -65,6 +79,8 @@ event_case too_long 'PROCD_EVENT state=UNKNOWN reason=oversize action=none' "$bi
 snapshot_case() {
     name=$1 expected=$2 response=$3 status=$4
     : > "$PROCD_TEST_FORBIDDEN"
+    printf '0\n' > "$PROCD_TEST_COUNTER"
+    printf '700:2000\n' > "$PODKOP_GUARD_PROCD_BUS_FILE"
     PROCD_TEST_REPLY="$response" PROCD_TEST_UBUS="$status" export PROCD_TEST_REPLY PROCD_TEST_UBUS
     actual=$(sh "$worker" watchdog-procd-snapshot) || {
         echo "FAIL snapshot $name: rc" >&2; exit 1;
@@ -105,6 +121,23 @@ printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/24430/cmdline"
 rm -f "$tmp/proc/24430/exe"
 ln -s '/usr/bin/sing-box (deleted)' "$tmp/proc/24430/exe"
 snapshot_case deleted_executable 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_unavailable action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","run"]}}}}' ok
+# A second observation must agree with the first before reporting RUNNING.
+rm -f "$tmp/proc/24430/exe"
+ln -s /usr/bin/sing-box "$tmp/proc/24430/exe"
+running='{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","run"]}}}}'
+export PROCD_TEST_RACE=registration
+snapshot_case registration_changed 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_changed action=none' "$running" ok
+PROCD_TEST_RACE=rpc
+snapshot_case second_rpc_failed 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_changed action=none' "$running" ok
+PROCD_TEST_RACE=bus
+snapshot_case bus_changed 'PROCD_SNAPSHOT state=UNKNOWN reason=ubusd_identity_changed action=none' "$running" ok
+PROCD_TEST_RACE=argv
+snapshot_case second_argv_changed 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_unavailable action=none' "$running" ok
+printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/24430/cmdline"
+PROCD_TEST_RACE=birth
+snapshot_case birth_changed 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_unavailable action=none' "$running" ok
+unset PROCD_TEST_RACE
+snapshot_case fresh_identity 'PROCD_SNAPSHOT state=RUNNING pid=24430 action=none' "$running" ok
 # Disallow arguments that could accidentally request service actions.
 for cmd in watchdog-procd-event watchdog-procd-snapshot; do
     set +e

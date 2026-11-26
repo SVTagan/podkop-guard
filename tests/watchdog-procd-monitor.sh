@@ -6,7 +6,7 @@ case "$worker" in /*) ;; *) worker="$(pwd)/${worker#./}" ;; esac
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/bin" "$tmp/ram"
-printf 'BUS1\n' > "$tmp/bus"
+printf '700:2000\n' > "$tmp/bus"
 
 cat > "$tmp/bin/ubus" <<'SH'
 #!/bin/sh
@@ -22,15 +22,15 @@ if [ "$#" -eq 6 ] && [ "$1 $2 $3 $4 $5 $6" = '-t 5 call service list {"name":"si
     count=$(cat "$PROCD_B2_COUNT" 2>/dev/null || echo 0)
     count=$((count + 1))
     printf '%s\n' "$count" > "$PROCD_B2_COUNT"
-    if [ "$PROCD_B2_MODE" = rebind ] && [ "$count" -ge 2 ]; then
-        printf 'BUS2\n' > "$PROCD_B2_BUS_FILE"
+    if [ "$PROCD_B2_MODE" = rebind ] && [ "$count" -ge 3 ]; then
+        printf '700:2001\n' > "$PROCD_B2_BUS_FILE"
     fi
     if [ "$PROCD_B2_MODE" = bus_outage ]; then
-        if [ "$count" -eq 2 ]; then printf 'DOWN\n' > "$PROCD_B2_BUS_FILE"; fi
-        if [ "$count" -eq 3 ]; then printf 'BUS2\n' > "$PROCD_B2_BUS_FILE"; fi
+        if [ "$count" -eq 3 ]; then printf 'DOWN\n' > "$PROCD_B2_BUS_FILE"; fi
+        if [ "$count" -eq 5 ]; then printf '700:2001\n' > "$PROCD_B2_BUS_FILE"; fi
     fi
     pid=100
-    if [ "$PROCD_B2_MODE" = pid_change ] && [ "$count" -ge 2 ]; then pid=200; fi
+    if [ "$PROCD_B2_MODE" = pid_change ] && [ "$count" -ge 3 ]; then pid=200; fi
     printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":%s,"command":["/usr/bin/sing-box","run"]}}}}\n' "$pid"
     exit 0
 fi
@@ -67,7 +67,7 @@ passed=0
 case_run() {
     name=$1 mode=$2 expected=$3 cycles=$4
     PROCD_B2_MODE="$mode"; export PROCD_B2_MODE
-    printf 'BUS1\n' > "$PROCD_B2_BUS_FILE"
+    printf '700:2000\n' > "$PROCD_B2_BUS_FILE"
     rm -f "$PROCD_B2_COUNT" "$PROCD_B2_SUB_LOG" "$PROCD_B2_FORBIDDEN"
     # Bash is used for the Linux CI host; OpenWrt QEMU tests actual BusyBox ash.
     output=$(bash "$worker" watchdog-procd-monitor "$cycles" 1) || {
@@ -107,13 +107,13 @@ case_run bus_outage bus_outage 'subscription=LOST reason=ubusd_unavailable' 5
 [ "$(wc -l < "$PROCD_B2_SUB_LOG")" -eq 2 ] || { echo 'FAIL bus outage did not resubscribe' >&2; exit 1; }
 
 
-# When the ubus daemon disappears, the current snapshot remains diagnostic,
-# but neither the subscription nor history is treated as healthy.
+# When the ubus daemon disappears, RUNNING is not a verified snapshot,
+# even if the RPC fixture still returns a registered process.
 PROCD_B2_MODE=quiet; export PROCD_B2_MODE
 printf 'DOWN\n' > "$PROCD_B2_BUS_FILE"
 rm -f "$PROCD_B2_COUNT" "$PROCD_B2_SUB_LOG" "$PROCD_B2_FORBIDDEN"
 output=$(bash "$worker" watchdog-procd-monitor 2 1)
-case "$output" in *'subscription=UNKNOWN snapshot=RUNNING'*'PROCD_MONITOR_END completed=2 attempts=0 resets=0 action=none'*) ;; *)
+case "$output" in *'subscription=UNKNOWN snapshot=UNKNOWN'*'PROCD_MONITOR_END completed=2 attempts=0 resets=0 action=none'*) ;; *)
     printf 'FAIL disconnected-bus case:\n%s\n' "$output" >&2; exit 1;;
 esac
 [ ! -s "$PROCD_B2_FORBIDDEN" ] || exit 1
@@ -123,7 +123,7 @@ printf 'PASS disconnected_bus\n'
 # The explicit continuous observer must honor SIGTERM and reap its own
 # subscriber without leaving a FIFO in tmpfs.
 PROCD_B2_MODE=quiet; export PROCD_B2_MODE
-printf 'BUS1\n' > "$PROCD_B2_BUS_FILE"
+printf '700:2000\n' > "$PROCD_B2_BUS_FILE"
 rm -f "$PROCD_B2_COUNT" "$PROCD_B2_SUB_LOG" "$PROCD_B2_FORBIDDEN"
 bash "$worker" watchdog-procd-follow > "$tmp/follow.log" 2>&1 &
 follow_pid=$!

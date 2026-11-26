@@ -274,6 +274,10 @@ for marker in wrong_exe deleted_exe missing_exe wrong_argv missing_argv truncate
     grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
 done
 echo PASS_VM_B6_PROC_IDENTITY_FIXTURES
+for marker in command_changed command_rearmed command_missing command_invalid command_change_discards_loopback; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
+done
+echo PASS_VM_B6_COMMAND_GENERATION_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

@@ -8,6 +8,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/bin"
 mkdir -p "$tmp/proc" "$tmp/netfilter"
+fixture_command_id=$(printf '%s' '2f7573722f62696e2f73696e672d626f780072756e00' | sha256sum)
+fixture_command_id=${fixture_command_id%% *}
 : > "$tmp/list.pid"
 make_birth() {
     mkdir -p "$tmp/proc/$1"
@@ -229,7 +231,7 @@ case_run() {
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
     esac
     case "$name" in
-        healthy) case "$output" in *' birth=1000 bus=700:2000') ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
+        healthy) case "$output" in *" birth=1000 bus=700:2000 command_id=$fixture_command_id") ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
         same_pid_birth_changed*) case "$output" in *'reason=runtime_identity_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         bus_identity_changed*) case "$output" in *'reason=ubusd_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         wrong_exe|deleted_exe|missing_exe|wrong_argv|missing_argv|truncated_argv|extra_argv)
@@ -301,12 +303,12 @@ export PODKOP_GUARD_WATCH_CONTROL_PROBE WATCH_TEST_PING
 case_run control_healthy HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 WATCH_TEST_PING=down
 case_run control_filtered HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
-PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID=12345:1000:700:2000
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID="12345:1000:700:2000:$fixture_command_id"
 export PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID
 case_run control_suppresses_suspect UNKNOWN 2 timeout present 12345 true 0 valid up
 WATCH_TEST_PING=up
 case_run control_recovers SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
-PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID=12345:999:700:2000
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID="12345:999:700:2000:$fixture_command_id"
 case_run old_pid_no_control SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
 unset PODKOP_GUARD_WATCH_CONTROL_PROBE PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID WATCH_TEST_PING
 
