@@ -1231,7 +1231,7 @@ watch_config_check() {
     WATCH_CONFIG_ID=
     if watch_config_path "$1"; then
         WATCH_CONFIG_REASON=unsupported_dns_config
-        validated=$(jq -cesS '
+        if validated=$(jq -cesS '
             def includes($value):
                 if type == "string" then . == $value
                 elif type == "array" then all(.[]; type == "string") and any(.[]; . == $value)
