@@ -8,27 +8,54 @@ set -eu
 # inherit the completed preceding fixture, not recreate or repair its state.
 fixture_manifest=/tmp/pg-worker-fixtures.sha256
 boundary_manifest=/tmp/pg-worker-b6.sha256
-verify_split_boundary() {
-    local service raw
-    cmp -s /usr/bin/podkop-guard /mnt/pg-bundle/podkop-guard
-    [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
-    for service in sing-box podkop-guard; do
-        raw=$(ubus -t 3 call service list "{\"name\":\"$service\"}")
-        printf '%s\n' "$raw" | jq -e 'type == "object" and length == 0' >/dev/null
-    done
-    if pidof sing-box >/dev/null 2>&1; then
-        echo FAIL_VM_SPLIT_SING_BOX_ALIVE >&2; return 1
+verify_split_boundary() (
+    phase=$1
+    fail_boundary() {
+        printf 'FAIL_VM_SPLIT_BOUNDARY phase=%s reason=%s\n' "$phase" "$1" >&2
+        exit 1
+    }
+    case "$phase" in before-lifecycle|after-lifecycle) ;; *) fail_boundary invalid_phase ;; esac
+    cmp -s /usr/bin/podkop-guard /mnt/pg-bundle/podkop-guard || fail_boundary worker_changed
+    [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ] || fail_boundary lkg_changed
+    raw=$(ubus -t 3 call service list '{"name":"podkop-guard"}') || fail_boundary guard_rpc
+    printf '%s\n' "$raw" | jq -es 'length == 1 and (.[0] | type == "object" and length == 0)' >/dev/null || fail_boundary guard_registered
+    raw=$(ubus -t 3 call service list '{"name":"sing-box"}') || fail_boundary sing_box_rpc
+    if [ "$phase" = before-lifecycle ]; then
+        # The package may leave an empty disabled registration. Only the
+        # existing lifecycle fixture is allowed to remove it later.
+        registration=$(printf '%s\n' "$raw" | jq -ers '
+            if length != 1 then empty else .[0] |
+                if type != "object" then empty
+                elif length == 0 then "absent"
+                elif keys == ["sing-box"] and (.["sing-box"] | type == "object" and
+                    ((has("instances") | not) or .instances == {})) then "empty"
+                else empty end
+            end
+        ') || fail_boundary sing_box_instance_or_invalid
+        case "$registration" in
+            absent) ;;
+            empty)
+                enabled=$(uci -q get sing-box.main.enabled) || fail_boundary sing_box_enabled_unavailable
+                [ "$enabled" = 0 ] || fail_boundary sing_box_not_disabled
+                registration=empty_disabled ;;
+            *) fail_boundary sing_box_instance_or_invalid ;;
+        esac
+    else
+        printf '%s\n' "$raw" | jq -es 'length == 1 and (.[0] | type == "object" and length == 0)' >/dev/null || fail_boundary sing_box_registered
+        registration=absent
     fi
-    [ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ] || return 1
-    [ ! -e /var/run/podkop_list_update.pid ] && [ ! -L /var/run/podkop_list_update.pid ] || return 1
-    [ ! -e /tmp/podkop-guard-probe.lock/active ]
-    [ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ]
-    [ -f /tmp/podkop-guard-probe.lock/lease ]
+    if pidof sing-box >/dev/null 2>&1; then fail_boundary sing_box_alive; fi
+    [ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ] || fail_boundary podkop_present
+    [ ! -e /var/run/podkop_list_update.pid ] && [ ! -L /var/run/podkop_list_update.pid ] || fail_boundary updater_marker_present
+    [ ! -e /tmp/podkop-guard-probe.lock/active ] && [ ! -L /tmp/podkop-guard-probe.lock/active ] || fail_boundary active_slot_present
+    [ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ] && [ ! -L /tmp/podkop-guard-probe.lock/active.abandoned ] || fail_boundary abandoned_slot_present
+    [ -f /tmp/podkop-guard-probe.lock/lease ] && [ ! -L /tmp/podkop-guard-probe.lock/lease ] || fail_boundary lease_missing_or_invalid
     (
         exec 7>>/tmp/podkop-guard-probe.lock/lease
         flock -n 7
-    )
-}
+    ) || fail_boundary lease_busy_or_error
+    printf 'VM_SPLIT_BOUNDARY phase=%s sing_box_registration=%s\n' "$phase" "$registration"
+)
 run_watch_suite() {
     local name log started rc
     name=$1; log=$2; started=$(date +%s); rc=0
@@ -39,7 +66,7 @@ run_watch_suite() {
 }
 
 run_runtime_phase() {
-    verify_split_boundary
+    verify_split_boundary before-lifecycle
     [ ! -e "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ] || return 1
     [ -f "$fixture_manifest" ] && [ ! -L "$fixture_manifest" ] || return 1
     sha256sum -c "$fixture_manifest"
@@ -85,7 +112,7 @@ run_runtime_phase() {
 
     # The next serial command uses the exact same guest and worker, but a
     # separate bounded timeout. Preserve the LKG baseline across the split.
-    verify_split_boundary
+    verify_split_boundary after-lifecycle
     sha256sum /usr/bin/podkop-guard /etc/podkop-guard/lkg-marker \
         /etc/podkop-guard/lkg.srs /etc/podkop-guard/lkg-subnets.lst > "$boundary_manifest"
     rm -f "$fixture_manifest"
@@ -104,7 +131,7 @@ case "$1" in
         exit 0 ;;
     finalize)
         [ ! -e "$fixture_manifest" ] && [ ! -L "$fixture_manifest" ] || exit 1
-        verify_split_boundary
+        verify_split_boundary after-lifecycle
         [ -f "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ] || exit 1
         sha256sum -c "$boundary_manifest"
         echo PASS_VM_B6_SPLIT_FINAL_PRECONDITIONS
@@ -369,7 +396,7 @@ done
 echo PASS_VM_B6_DNS_LAYOUT_FIXTURES
 # Preserve the completed fixtures and the exact installed worker/LKG across
 # serial phases. A later phase must not recreate or repair their state.
-verify_split_boundary
+verify_split_boundary before-lifecycle
 sha256sum /usr/bin/podkop-guard /etc/podkop-guard/lkg-marker \
     /etc/podkop-guard/lkg.srs /etc/podkop-guard/lkg-subnets.lst \
     /tmp/pg-b6-procd-tests /tmp/pg-b3-watch-tests /tmp/pg-b3-monitor-tests > "$fixture_manifest"
