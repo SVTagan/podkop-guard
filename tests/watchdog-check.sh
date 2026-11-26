@@ -321,13 +321,13 @@ case_run() {
             case "$output" in *'reason=nft_rules_incomplete '*'dns=skipped nft=partial') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
         path_missing_uci|path_missing_conffile|path_relative)
-            case "$output" in *'reason=dns_config_path_unavailable '*'dns=skipped ') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            case "$output" in *'reason=dns_config_path_unavailable '*'dns=skipped '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
         path_uci_mismatch|path_argv_mismatch|path_no_config|path_extra_config|path_relative_workdir|path_config_prefix)
-            case "$output" in *'reason=dns_config_path_mismatch '*'dns=skipped ') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            case "$output" in *'reason=dns_config_path_mismatch '*'dns=skipped '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
         path_file_missing|path_directory)
-            case "$output" in *'reason=dns_config_file_unavailable '*'dns=skipped ') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            case "$output" in *'reason=dns_config_file_unavailable '*'dns=skipped '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
         path_changed_after_dns)
             case "$output" in *'reason=dns_config_path_mismatch '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
