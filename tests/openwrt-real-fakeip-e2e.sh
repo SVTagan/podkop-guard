@@ -659,16 +659,19 @@ maintenance_probe stale_reload_marker healthy
 # Separate CLI, as used by cron and operators, with no PID marker.
 begin_maintenance list_update direct
 maintenance_probe standalone_list_update list
-# Grace is shortened ONLY for the fixture. Record the current absence
-# of a prolonged-maintenance limit; this is evidence, not a desired
-# permanent acceptance contract. No healthy baseline during maintenance.
-PODKOP_GUARD_WATCH_GRACE=1 sh "$worker" watchdog-monitor 4 1 > "$tmp/maintenance.log" 2>&1 ||
+# Shorten the diagnostic threshold only in the disposable fixture.
+# First sample is maintenance, last must be prolonged UNKNOWN; intermediate
+# timing can vary. Neither state can create a healthy baseline.
+PODKOP_GUARD_WATCH_GRACE=1 PODKOP_GUARD_WATCH_MAINTENANCE_MAX=2 \
+    sh "$worker" watchdog-monitor 4 1 > "$tmp/maintenance.log" 2>&1 ||
     fail maintenance_monitor
 cat "$tmp/maintenance.log"
-for n in 1 2 3 4; do
-    grep -Fxq "MONITOR sample=$n/4 state=TRANSITION phase=TRANSITION pid=$box streak=0 reason=list_update" "$tmp/maintenance.log" ||
-        fail "maintenance_monitor_sample_$n"
-done
+grep -Fxq "MONITOR sample=1/4 state=TRANSITION phase=TRANSITION pid=$box streak=0 reason=list_update" "$tmp/maintenance.log" ||
+    fail maintenance_monitor_first
+grep -Fxq "MONITOR sample=4/4 state=UNKNOWN phase=UNKNOWN pid=$box streak=0 reason=maintenance_prolonged" "$tmp/maintenance.log" ||
+    fail maintenance_monitor_prolonged
+[ "$(grep -Ec "^MONITOR sample=[1-4]/4 state=(TRANSITION phase=TRANSITION pid=$box streak=0 reason=list_update|UNKNOWN phase=UNKNOWN pid=$box streak=0 reason=maintenance_prolonged)$" "$tmp/maintenance.log")" -eq 4 ] ||
+    fail maintenance_monitor_unexpected_sample
 grep -Fxq 'MONITOR_END completed=4 confirmations=0 action=none' "$tmp/maintenance.log" ||
     fail maintenance_monitor_end
 echo PASS_VM_B6_PROLONGED_MAINTENANCE_EVIDENCE
@@ -695,16 +698,15 @@ printf 'not-a-pid\n' > "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
 maintenance_probe malformed_marker healthy
 echo PASS_VM_B6_STALE_MARKER_EVIDENCE
 
-# Existing substring checks mistake these non-operations for maintenance.
-# Pin the observed limitation for B6.2; later replace these expectations
-# with strict argument matching, not with skipped assertions.
+# Exact argument matching must no longer suppress these non-operations.
 begin_maintenance list_update_extra direct
-maintenance_probe list_update_prefix_collision list
+maintenance_probe list_update_prefix_collision healthy
 end_maintenance
 begin_maintenance start_extra direct
-maintenance_probe lifecycle_prefix_collision lifecycle
+maintenance_probe lifecycle_prefix_collision healthy
 end_maintenance
 echo PASS_VM_B6_CMDLINE_PREFIX_COLLISION_EVIDENCE
+echo PASS_VM_B6_MAINTENANCE_EXACT_AND_BOUNDED
 rm -f "$PODKOP_GUARD_WATCH_LIST_PID_FILE"
 maintenance_probe final_healthy healthy
 

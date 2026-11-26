@@ -75,6 +75,7 @@ run_case() {
       PODKOP_GUARD_WATCH_CHECK_SCRIPT="$tmp/mock-check" \
       PODKOP_GUARD_WATCH_UPTIME_FILE="$tmp/uptime" \
       PODKOP_GUARD_WATCH_GRACE=0 \
+      PODKOP_GUARD_WATCH_MAINTENANCE_MAX="${MONITOR_TEST_MAINTENANCE_MAX:-900}" \
       sh "$script" watchdog-monitor "$#" 0 2>&1)
     rc=$?
     set -e
@@ -200,6 +201,23 @@ export MONITOR_TEST_CONTROL_MODE
 run_case command_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
     "$H" "$T_CMD"
 unset MONITOR_TEST_CONTROL_MODE
+# Advance the private monotonic clock by one second per sample.
+printf '100.00\n' > "$tmp/uptime"
+MONITOR_TEST_MAINTENANCE_MAX=2 run_case maintenance_prolonged \
+    'sample=4/4 state=UNKNOWN phase=UNKNOWN pid=101 streak=0 reason=maintenance_prolonged' 0 \
+    'TRANSITION|101|0|100.00|list_update' 'TRANSITION|101|0|101.00|list_update' \
+    'TRANSITION|101|0|102.00|podkop_lifecycle' 'TRANSITION|101|0|103.00|list_update'
+printf '100.00\n' > "$tmp/uptime"
+MONITOR_TEST_MAINTENANCE_MAX=1 run_case prolonged_requires_baseline \
+    'sample=6/6 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H|100.00" 'TRANSITION|101|0|101.00|list_update' \
+    'TRANSITION|101|0|102.00|list_update' "$T|103.00" "$T|104.00" "$T|105.00"
+printf '100.00\n' > "$tmp/uptime"
+MONITOR_TEST_MAINTENANCE_MAX=1 run_case maintenance_window_resets \
+    'sample=5/5 state=TRANSITION phase=TRANSITION pid=101 streak=0 reason=list_update' 0 \
+    'TRANSITION|101|0|101.00|list_update' 'TRANSITION|101|0|102.00|list_update' \
+    'TRANSITION|101|0|103.00|list_update' "$H|104.00" 'TRANSITION|101|0|105.00|list_update'
+printf '100.00\n' > "$tmp/uptime"
 run_case late_probe_rejected 'reason=probe_late' 0 \
     "$H|100.00" "$T|120.00" "$T|121.00" "$T|122.00"
 # A hard deadline is UNKNOWN, and the suspect streak must restart from zero.
@@ -238,6 +256,13 @@ case "$output" in
     *) printf 'FAIL startup_grace:\n%s\n' "$output" >&2; exit 1 ;;
 esac
 
+for invalid in 0 86401 abc; do
+    set +e
+    PODKOP_GUARD_WATCH_MAINTENANCE_MAX="$invalid" sh "$script" watchdog-monitor 1 0 >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ] || { echo "FAIL invalid maintenance threshold $invalid rc=$rc" >&2; exit 1; }
+done
 for args in '0 0' '31 0' '2 301' 'abc 0'; do
     set +e
     sh "$script" watchdog-monitor $args >/dev/null 2>&1

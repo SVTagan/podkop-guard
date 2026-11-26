@@ -278,6 +278,13 @@ for marker in command_changed command_rearmed command_missing command_invalid co
     grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
 done
 echo PASS_VM_B6_COMMAND_GENERATION_FIXTURES
+for marker in premaintenance_direct premaintenance_shell maintenance_prefix_marker maintenance_prefix_lifecycle maintenance_embedded_command maintenance_wrong_path maintenance_truncated_token maintenance_proc_disappeared; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+for marker in maintenance_prolonged prolonged_requires_baseline maintenance_window_resets; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
+done
+echo PASS_VM_B6_MAINTENANCE_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

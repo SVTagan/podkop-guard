@@ -375,10 +375,28 @@ case_run argv_changed_during_dns UNKNOWN 2 timeout present 12345 true 0 valid up
 WATCH_TEST_ID_CHANGE=exe
 case_run exe_changed_during_dns UNKNOWN 2 healthy present 12345 true 0 valid up
 unset WATCH_TEST_ID_CHANGE
+# Exact operation and argument boundaries: no flattened-string matches.
+printf '/usr/bin/podkop\000list_update\000' > "$tmp/proc/321/cmdline"
+case_run premaintenance_direct TRANSITION 0 healthy present 12345 true 0 valid up
+printf 'sh\000/usr/bin/podkop\000reload\000' > "$tmp/proc/321/cmdline"
+case_run premaintenance_shell TRANSITION 0 healthy present 12345 true 0 valid up
+printf '/bin/sh\000/usr/bin/podkop\000list_update_extra\000' > "$tmp/proc/321/cmdline"
+printf '321\n' > "$tmp/list.pid"
+case_run maintenance_prefix_marker HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+rm -f "$tmp/list.pid"
+printf '/bin/sh\000/usr/bin/podkop\000start_extra\000' > "$tmp/proc/321/cmdline"
+case_run maintenance_prefix_lifecycle HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+printf '/bin/sh\000-c\000/usr/bin/podkop list_update\000' > "$tmp/proc/321/cmdline"
+case_run maintenance_embedded_command HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+printf '/bin/sh\000/tmp/podkop\000list_update\000' > "$tmp/proc/321/cmdline"
+case_run maintenance_wrong_path HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+printf '/bin/sh\000/usr/bin/podkop\000list_update' > "$tmp/proc/321/cmdline"
+case_run maintenance_truncated_token HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+rm -f "$tmp/proc/321/cmdline"
 # Force the check/use gap in a private copy of the actual maintenance
 # function. No scheduling lottery, actual PID signals or production hook.
 awk '
-    /^watch_maintenance_active\(\) \{/ { active=1 }
+    /^watch_maintenance_(command|active)\(\) \{/ { active=1 }
     active { print }
     active && /if \[ -n "\$pid" \] && \[ -r / {
         print "            rm -f \"$proc_root/$pid/cmdline\""; marker++
@@ -387,7 +405,7 @@ awk '
         print "        rm -f \"$proc\""; scan++
     }
     active && /^}$/ { active=0; found++ }
-    END { if (found != 1 || marker != 1 || scan != 1) exit 1 }
+    END { if (found != 2 || marker != 1 || scan != 1) exit 1 }
 ' "$script" > "$tmp/maintenance-race.sh"
 mkdir -p "$tmp/race-proc/321" "$tmp/race-proc/322"
 printf '321\n' > "$tmp/race-marker"

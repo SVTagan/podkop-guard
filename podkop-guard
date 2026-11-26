@@ -1016,10 +1016,36 @@ watch_local_loopback() {
     return 1
 }
 
+# Match NUL-delimited argv, not flattened command-line substrings.
+# Only the supported Podkop script and exact operation token count.
+watch_maintenance_command() {
+    local cmd
+    cmd=$(LC_ALL=C hexdump -v -n 128 -e '1/1 "%02x"' "$1" 2>/dev/null) || return 1
+    # Strip an optional known shell interpreter (hex includes terminal NUL).
+    case "$cmd" in
+        2f62696e2f736800*) cmd=${cmd#2f62696e2f736800} ;; # /bin/sh
+        2f62696e2f61736800*) cmd=${cmd#2f62696e2f61736800} ;; # /bin/ash
+        736800*) cmd=${cmd#736800} ;; # sh
+        61736800*) cmd=${cmd#61736800} ;; # ash
+    esac
+    case "$cmd" in
+        2f7573722f62696e2f706f646b6f7000*) cmd=${cmd#2f7573722f62696e2f706f646b6f7000} ;; # /usr/bin/podkop
+        *) return 1 ;;
+    esac
+    case "$cmd" in
+        6c6973745f75706461746500*) WATCH_MAINTENANCE=list_update ;;
+        737461727400*|73746f7000*|72656c6f616400*|7265737461727400*)
+            WATCH_MAINTENANCE=podkop_lifecycle ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
 watch_maintenance_active() {
-    local proc_root list_pid_file pid cmd proc
+    local proc_root list_pid_file pid proc
     proc_root="${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}"
     list_pid_file="${PODKOP_GUARD_WATCH_LIST_PID_FILE:-/var/run/podkop_list_update.pid}"
+    WATCH_MAINTENANCE=""
 
     if [ -r "$list_pid_file" ]; then
         read -r pid 2>/dev/null < "$list_pid_file" || pid=""
@@ -1027,24 +1053,15 @@ watch_maintenance_active() {
             ''|*[!0-9]*) pid="" ;;
         esac
         if [ -n "$pid" ] && [ -r "$proc_root/$pid/cmdline" ]; then
-            # The process can exit after the readability check. Redirect
-            # stderr before opening procfs, including shell open errors.
-            cmd=$(tr '\000' ' ' 2>/dev/null < "$proc_root/$pid/cmdline")
-            case "$cmd" in
-                *'podkop list_update'*) WATCH_MAINTENANCE="list_update"; return 0 ;;
-            esac
+            # The process can exit between the check and open.
+            watch_maintenance_command "$proc_root/$pid/cmdline" && return 0
         fi
     fi
 
     # Cron/manual list_update may have no PID file.
     for proc in "$proc_root"/[0-9]*/cmdline; do
         [ -r "$proc" ] || continue
-        cmd=$(tr '\000' ' ' 2>/dev/null < "$proc")
-        case "$cmd" in
-            *'podkop list_update'*) WATCH_MAINTENANCE="list_update"; return 0 ;;
-            *'/usr/bin/podkop reload'*|*'/usr/bin/podkop restart'*|*'/usr/bin/podkop start'*|*'/usr/bin/podkop stop'*)
-                WATCH_MAINTENANCE="podkop_lifecycle"; return 0 ;;
-        esac
+        watch_maintenance_command "$proc" && return 0
     done
     return 1
 }
@@ -1651,7 +1668,7 @@ watchdog_monitor() {
     local missing_active streak streak_kind phase confirmations startup_deadline
     local stopped late_probe sample_elapsed max_sample display_cycles changes_only last_phase last_state
     local control_identity control_attempts control_probe sample_reason
-    local birth bus identity last_bus command_id
+    local birth bus identity last_bus command_id maintenance_max maintenance_since
 
     [ "$#" -le 2 ] || {
         err "usage: podkop-guard watchdog-monitor [cycles 1..30] [interval_seconds 0..300]"
@@ -1663,9 +1680,10 @@ watchdog_monitor() {
     threshold="${PODKOP_GUARD_WATCH_THRESHOLD:-3}"
     grace="${PODKOP_GUARD_WATCH_GRACE:-180}"
     max_sample="${PODKOP_GUARD_WATCH_MAX_SAMPLE:-8}"
+    maintenance_max="${PODKOP_GUARD_WATCH_MAINTENANCE_MAX:-900}"
     WATCH_MONITOR_UPTIME_FILE="${PODKOP_GUARD_WATCH_UPTIME_FILE:-/proc/uptime}"
 
-    for payload in "$cycles" "$interval" "$threshold" "$grace" "$max_sample"; do
+    for payload in "$cycles" "$interval" "$threshold" "$grace" "$max_sample" "$maintenance_max"; do
         watch_monitor_number "$payload" || { err "invalid monitor numeric argument"; return 2; }
     done
     { { [ "$cycles" -ge 1 ] && [ "$cycles" -le 30 ]; } ||
@@ -1677,10 +1695,12 @@ watchdog_monitor() {
         err "monitor limits: cycles=1..30 interval=0..300 threshold=2..10 grace=0..600"
         return 2
     }
+    [ "$maintenance_max" -ge 1 ] && [ "$maintenance_max" -le 86400 ] || { err "maintenance diagnostic threshold must be 1..86400 seconds"; return 2; }
     [ "$changes_only" = "0" ] || [ "$changes_only" = "1" ] || { err "changes_only must be 0 or 1"; return 2; }
     [ -r "$0" ] || { err "monitor wrapper script is not readable"; return 2; }
     watch_monitor_now || { err "cannot read monotonic /proc/uptime"; return 2; }
 
+    maintenance_since=""
     startup_deadline=$((WATCH_MONITOR_NOW + grace))
     hold_until=$startup_deadline
     armed_identity=""
@@ -1711,6 +1731,7 @@ watchdog_monitor() {
             fi
             last_phase=UNKNOWN
             last_state=UNKNOWN
+            maintenance_since=""
             armed_identity=""
             control_identity=""
             control_attempts=0
@@ -1803,6 +1824,20 @@ watchdog_monitor() {
             pid=none
         fi
 
+        # A prolonged observed maintenance window is uncertainty, not
+        # permission to interfere. Retain the same suppression/grace.
+        case "$state:$sample_reason" in
+            TRANSITION:list_update|TRANSITION:podkop_lifecycle)
+                if [ -z "$maintenance_since" ] || [ "$now" -lt "$maintenance_since" ]; then
+                    maintenance_since=$now
+                fi
+                if [ "$((now - maintenance_since))" -ge "$maintenance_max" ]; then
+                    state=UNKNOWN
+                    sample_reason=maintenance_prolonged
+                fi ;;
+            *) maintenance_since="" ;;
+        esac
+
         # Only compare identities of valid samples. A bus replacement also
         # invalidates a missing-process streak, even without a sing-box PID.
         case "$state" in
@@ -1866,7 +1901,7 @@ watchdog_monitor() {
                 control_attempts=0
                 last_identity=""
                 case "$sample_reason" in
-                    procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|ubusd_identity_unavailable|runtime_identity_unavailable)
+                    procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|ubusd_identity_unavailable|runtime_identity_unavailable|maintenance_prolonged)
                         hold_until=$((now + grace)) ;;
                 esac
                 missing_active=0
