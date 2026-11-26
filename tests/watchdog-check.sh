@@ -373,4 +373,32 @@ case_run argv_changed_during_dns UNKNOWN 2 timeout present 12345 true 0 valid up
 WATCH_TEST_ID_CHANGE=exe
 case_run exe_changed_during_dns UNKNOWN 2 healthy present 12345 true 0 valid up
 unset WATCH_TEST_ID_CHANGE
+# Force the check/use gap in a private copy of the actual maintenance
+# function. No scheduling lottery, actual PID signals or production hook.
+awk '
+    /^watch_maintenance_active\(\) \{/ { active=1 }
+    active { print }
+    active && /if \[ -n "\$pid" \] && \[ -r / {
+        print "            rm -f \"$proc_root/$pid/cmdline\""; marker++
+    }
+    active && /\[ -r "\$proc" \] \|\| continue/ {
+        print "        rm -f \"$proc\""; scan++
+    }
+    active && /^}$/ { active=0; found++ }
+    END { if (found != 1 || marker != 1 || scan != 1) exit 1 }
+' "$script" > "$tmp/maintenance-race.sh"
+mkdir -p "$tmp/race-proc/321" "$tmp/race-proc/322"
+printf '321\n' > "$tmp/race-marker"
+printf '/bin/sh\000/usr/bin/podkop\000list_update\000' > "$tmp/race-proc/321/cmdline"
+printf '/bin/sh\000/usr/bin/podkop\000reload\000' > "$tmp/race-proc/322/cmdline"
+race_rc=0
+race_output=$(PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/race-proc" \
+    PODKOP_GUARD_WATCH_LIST_PID_FILE="$tmp/race-marker" \
+    sh -c '. "$1"; watch_maintenance_active' race "$tmp/maintenance-race.sh" 2>&1) || race_rc=$?
+[ "$race_rc" -eq 1 ] && [ -z "$race_output" ] &&
+    [ ! -e "$tmp/race-proc/321/cmdline" ] && [ ! -e "$tmp/race-proc/322/cmdline" ] || {
+    printf 'FAIL maintenance_proc_disappeared: rc=%s output=%s\n' "$race_rc" "$race_output" >&2; exit 1
+}
+tests=$((tests + 1))
+echo PASS maintenance_proc_disappeared
 printf 'PASS: %s observer-only scenarios\n' "$tests"

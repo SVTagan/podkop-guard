@@ -1007,12 +1007,14 @@ watch_maintenance_active() {
     list_pid_file="${PODKOP_GUARD_WATCH_LIST_PID_FILE:-/var/run/podkop_list_update.pid}"
 
     if [ -r "$list_pid_file" ]; then
-        read -r pid < "$list_pid_file" || pid=""
+        read -r pid 2>/dev/null < "$list_pid_file" || pid=""
         case "$pid" in
             ''|*[!0-9]*) pid="" ;;
         esac
         if [ -n "$pid" ] && [ -r "$proc_root/$pid/cmdline" ]; then
-            cmd=$(tr '\000' ' ' < "$proc_root/$pid/cmdline" 2>/dev/null)
+            # The process can exit after the readability check. Redirect
+            # stderr before opening procfs, including shell open errors.
+            cmd=$(tr '\000' ' ' 2>/dev/null < "$proc_root/$pid/cmdline")
             case "$cmd" in
                 *'podkop list_update'*) WATCH_MAINTENANCE="list_update"; return 0 ;;
             esac
@@ -1022,7 +1024,7 @@ watch_maintenance_active() {
     # Cron/manual list_update may have no PID file.
     for proc in "$proc_root"/[0-9]*/cmdline; do
         [ -r "$proc" ] || continue
-        cmd=$(tr '\000' ' ' < "$proc" 2>/dev/null)
+        cmd=$(tr '\000' ' ' 2>/dev/null < "$proc")
         case "$cmd" in
             *'podkop list_update'*) WATCH_MAINTENANCE="list_update"; return 0 ;;
             *'/usr/bin/podkop reload'*|*'/usr/bin/podkop restart'*|*'/usr/bin/podkop start'*|*'/usr/bin/podkop stop'*)
