@@ -285,6 +285,10 @@ for marker in maintenance_prolonged prolonged_requires_baseline maintenance_wind
     grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
 done
 echo PASS_VM_B6_MAINTENANCE_FIXTURES
+for marker in structure_partial structure_missing_set structure_wrong_hook structure_wrong_type structure_wrong_priority structure_dormant structure_duplicate structure_bad_json structure_multi_json structure_read_error structure_partial_after_healthy structure_partial_after_timeout structure_wrong_after_healthy structure_wrong_after_timeout structure_extra; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+echo PASS_VM_B6_NFT_CHAINS_SETS_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

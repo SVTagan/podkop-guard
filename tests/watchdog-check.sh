@@ -58,9 +58,37 @@ fi
 SH
 cat > "$tmp/bin/nft" <<'SH'
 #!/bin/sh
-[ "$1 $2" = 'list tables' ] || exit 9
+if [ "$*" = '-j -t list table inet PodkopTable' ]; then
+    case "$WATCH_TEST_NFT" in
+        absent|error) exit 1 ;;
+        absent_after_dns|error_after_dns) [ ! -e "$WATCH_TEST_DNS_CALLED" ] || exit 1 ;;
+        structure_read_error) exit 1 ;;
+        structure_bad_json) printf '{\n'; exit 0 ;;
+        structure_multi_json) printf '{}\n{}\n'; exit 0 ;;
+    esac
+    fixture='{"nftables":[{"metainfo":{"json_schema_version":1}},{"table":{"family":"inet","name":"PodkopTable","handle":7}},{"chain":{"family":"inet","table":"PodkopTable","name":"mangle","type":"filter","hook":"prerouting","prio":-150,"policy":"accept","handle":8}},{"chain":{"family":"inet","table":"PodkopTable","name":"mangle_output","type":"route","hook":"output","prio":-150,"policy":"accept","handle":9}},{"chain":{"family":"inet","table":"PodkopTable","name":"proxy","type":"filter","hook":"prerouting","prio":-100,"policy":"accept","handle":10}},{"set":{"family":"inet","table":"PodkopTable","name":"localv4","type":"ipv4_addr","handle":11,"flags":["interval"]}},{"set":{"family":"inet","table":"PodkopTable","name":"podkop_subnets","type":"ipv4_addr","handle":12,"flags":["interval"]}},{"set":{"family":"inet","table":"PodkopTable","name":"interfaces","type":"ifname","handle":13,"flags":["interval"]}}]}'
+    case "$WATCH_TEST_NFT" in
+        structure_partial) filter='.nftables |= map(select(.chain.name? != "proxy"))' ;;
+        structure_wrong_hook) filter='(.nftables[] | select(.chain.name? == "proxy") | .chain.hook) = "output"' ;;
+        structure_wrong_type) filter='(.nftables[] | select(.set.name? == "interfaces") | .set.type) = "ipv4_addr"' ;;
+        structure_wrong_priority) filter='(.nftables[] | select(.chain.name? == "mangle") | .chain.prio) = -100' ;;
+        structure_dormant) filter='(.nftables[] | select(.table.name? == "PodkopTable") | .table.flags) = ["dormant"]' ;;
+        structure_duplicate) filter='.nftables += [.nftables[] | select(.chain.name? == "proxy")]' ;;
+        structure_missing_set) filter='.nftables |= map(select(.set.name? != "podkop_subnets"))' ;;
+        structure_partial_after_dns)
+            if [ -e "$WATCH_TEST_DNS_CALLED" ]; then filter='.nftables |= map(select(.chain.name? != "proxy"))'; else filter=.; fi ;;
+        structure_wrong_after_dns)
+            if [ -e "$WATCH_TEST_DNS_CALLED" ]; then filter='(.nftables[] | select(.chain.name? == "mangle") | .chain.prio) = -100'; else filter=.; fi ;;
+        structure_extra)
+            filter='.nftables += [{"set":{"family":"inet","table":"PodkopTable","name":"optional","type":"ipv4_addr"}},{"rule":{"family":"inet","table":"PodkopTable","chain":"mangle","expr":[{"counter":{"packets":1,"bytes":42}}]}}]' ;;
+        *) filter=. ;;
+    esac
+    printf '%s\n' "$fixture" | jq -c "$filter"
+    exit $?
+fi
+[ "$*" = 'list tables' ] || exit 9
 case "$WATCH_TEST_NFT" in
-    present) printf 'table inet PodkopTable\n' ;;
+    present|structure_*) printf 'table inet PodkopTable\n' ;;
     absent) printf 'table inet fw4\n' ;;
     error) exit 1 ;;
     absent_after_dns)
@@ -214,6 +242,21 @@ case_run() {
                 echo "FAIL $name: stale table evidence: $output" >&2; exit 1 ;;
             esac
             [ -e "$tmp/dns-called" ] || exit 1 ;;
+        structure_partial|structure_missing_set)
+            case "$output" in *'reason=nft_structure_partial '*'dns=skipped nft=partial') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        structure_wrong_hook|structure_wrong_type|structure_wrong_priority|structure_dormant|structure_duplicate)
+            case "$output" in *'reason=nft_structure_unsupported '*'dns=skipped nft=unsupported') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        structure_bad_json|structure_multi_json|structure_read_error)
+            case "$output" in *'reason=nft_table_unavailable '*'dns=skipped nft=unknown') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        structure_partial_after_*)
+            case "$output" in *'reason=nft_structure_partial '*'nft=partial') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        structure_wrong_after_*)
+            case "$output" in *'reason=nft_structure_unsupported '*'nft=unsupported') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
         conntrack_unavailable|conntrack_invalid)
             case "$output" in *'reason=conntrack_unverified '*) ;; *)
                 echo "FAIL $name: missing unverified reason $output" >&2; exit 1 ;;
@@ -291,6 +334,14 @@ case_run nft_lost_during_success UNKNOWN           2 healthy   absent_after_dns 
 case_run nft_lost_during_timeout UNKNOWN           2 timeout   absent_after_dns 12345 true 0 valid up
 case_run nft_error_during_success UNKNOWN          2 healthy   error_after_dns 12345 true 0 valid up
 case_run nft_error_during_timeout UNKNOWN          2 timeout   error_after_dns 12345 true 0 valid up
+for scenario in structure_partial structure_missing_set structure_wrong_hook structure_wrong_type structure_wrong_priority structure_dormant structure_duplicate structure_bad_json structure_multi_json structure_read_error; do
+    case_run "$scenario" UNKNOWN 2 timeout "$scenario" 12345 true 0 valid up
+done
+case_run structure_partial_after_healthy UNKNOWN 2 healthy structure_partial_after_dns 12345 true 0 valid up
+case_run structure_partial_after_timeout UNKNOWN 2 timeout structure_partial_after_dns 12345 true 0 valid up
+case_run structure_wrong_after_healthy UNKNOWN 2 healthy structure_wrong_after_dns 12345 true 0 valid up
+case_run structure_wrong_after_timeout UNKNOWN 2 timeout structure_wrong_after_dns 12345 true 0 valid up
+case_run structure_extra HEALTHY_SAMPLED 0 healthy structure_extra 12345 true 0 valid up
 case_run procd_error      UNKNOWN                 2 healthy   present 12345 true  0 valid down
 case_run unsupported_cfg  UNKNOWN                 2 healthy   present 12345 true  0 bad   up
 

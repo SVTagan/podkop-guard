@@ -964,6 +964,56 @@ watch_nft_table() {
     fi
 }
 
+# Minimal Podkop 0.7.24 structural contract, not full ruleset validation.
+# Terse JSON avoids reading set contents. Do not log raw nft output.
+watch_nft_structure() {
+    local raw result
+    raw=$(nft -j -t list table inet PodkopTable 2>/dev/null) || {
+        # Distinguish disappearance from a failed structural read.
+        watch_nft_table
+        [ "$WATCH_NFT" != present ] || WATCH_NFT=unknown
+        return 0
+    }
+    result=$(printf '%s\n' "$raw" | jq -sr '
+        def objects($kind; $name):
+            [.nftables[] | .[$kind]? | select(type == "object" and
+                .family == "inet" and .table == "PodkopTable" and .name == $name)];
+        def chain_ok($name; $type; $hook; $prio):
+            objects("chain"; $name) as $c |
+            ($c|length) == 1 and
+            ($c[0] | .type == $type and .hook == $hook and .prio == $prio and .policy == "accept");
+        def set_ok($name; $type):
+            objects("set"; $name) as $s |
+            ($s|length) == 1 and ($s[0].type == $type);
+        if length != 1 or (.[0]|type) != "object" or
+           (.[0].nftables|type) != "array" then "unknown"
+        else .[0] |
+            [.nftables[] | .table? | select(type == "object" and
+                .family == "inet" and .name == "PodkopTable")] as $table |
+            if ($table|length) != 1 then "unknown"
+            elif ($table[0].flags // [] | length) != 0 then "unsupported"
+            elif (objects("chain"; "mangle")|length) == 0 or
+                 (objects("chain"; "mangle_output")|length) == 0 or
+                 (objects("chain"; "proxy")|length) == 0 or
+                 (objects("set"; "localv4")|length) == 0 or
+                 (objects("set"; "podkop_subnets")|length) == 0 or
+                 (objects("set"; "interfaces")|length) == 0 then "partial"
+            elif chain_ok("mangle"; "filter"; "prerouting"; -150) and
+                 chain_ok("mangle_output"; "route"; "output"; -150) and
+                 chain_ok("proxy"; "filter"; "prerouting"; -100) and
+                 set_ok("localv4"; "ipv4_addr") and
+                 set_ok("podkop_subnets"; "ipv4_addr") and
+                 set_ok("interfaces"; "ifname") then "present"
+            else "unsupported"
+            end
+        end
+    ' 2>/dev/null) || result=unknown
+    case "$result" in
+        present|partial|unsupported) WATCH_NFT=$result ;;
+        *) WATCH_NFT=unknown ;;
+    esac
+}
+
 # A missing or unreadable Podkop table cannot establish a valid local DNS
 # sample. Keep the existing inactive/maintenance decisions separate.
 watch_nft_require_present() {
@@ -971,6 +1021,8 @@ watch_nft_require_present() {
     case "$WATCH_NFT" in
         present) return 0 ;;
         absent) reason=nft_table_absent ;;
+        partial) reason=nft_structure_partial ;;
+        unsupported) reason=nft_structure_unsupported ;;
         *) reason=nft_table_unavailable ;;
     esac
     printf 'WATCHDOG state=UNKNOWN reason=%s pid=%s dns=%s nft=%s\n' "$reason" "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
@@ -1174,6 +1226,8 @@ watchdog_check() {
     fi
 
     watch_nft_require_present || return 2
+    watch_nft_structure
+    watch_nft_require_present || return 2
 
     # This initial probe deliberately supports only the observed Podkop FakeIP
     # inbound. Other DNS layouts must not be declared broken.
@@ -1245,9 +1299,9 @@ watchdog_check() {
     watch_runtime_bus_verify "$check_bus"
     rc=$?
     case "$rc" in 1) return 0 ;; 2) return 2 ;; esac
-    # Invalidate both success and timeout if table evidence disappears during
-    # the sample. This checks presence only, not ruleset identity or contents.
-    watch_nft_table
+    # Revalidate the minimum structure, not counters or set contents.
+    # This is two observations, not an atomic ruleset generation check.
+    watch_nft_structure
     watch_nft_require_present || return 2
     if [ "$WATCH_DNS" = "fakeip" ] && [ "$WATCH_NFT" = "present" ]; then
         printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present loopback=%s birth=%s bus=%s command_id=%s\n' "$WATCH_PID" "$WATCH_LOOPBACK" "$check_birth" "$check_bus" "$command_id"

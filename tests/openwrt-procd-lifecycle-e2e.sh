@@ -118,8 +118,11 @@ printf '1000\n' > "$tmp/conntrack/nf_conntrack_max"
 printf '0\n' > "$tmp/count"
 cat > "$tmp/bin/nft" <<'SH'
 #!/bin/sh
-[ "$*" = 'list tables' ] || exit 19
-echo 'table inet PodkopTable'
+case "$*" in
+    'list tables') echo 'table inet PodkopTable' ;;
+    '-j -t list table inet PodkopTable') printf '%s\n' '{"nftables":[{"metainfo":{"json_schema_version":1}},{"table":{"family":"inet","name":"PodkopTable","handle":7}},{"chain":{"family":"inet","table":"PodkopTable","name":"mangle","type":"filter","hook":"prerouting","prio":-150,"policy":"accept","handle":8}},{"chain":{"family":"inet","table":"PodkopTable","name":"mangle_output","type":"route","hook":"output","prio":-150,"policy":"accept","handle":9}},{"chain":{"family":"inet","table":"PodkopTable","name":"proxy","type":"filter","hook":"prerouting","prio":-100,"policy":"accept","handle":10}},{"set":{"family":"inet","table":"PodkopTable","name":"localv4","type":"ipv4_addr","handle":11,"flags":["interval"]}},{"set":{"family":"inet","table":"PodkopTable","name":"podkop_subnets","type":"ipv4_addr","handle":12,"flags":["interval"]}},{"set":{"family":"inet","table":"PodkopTable","name":"interfaces","type":"ifname","handle":13,"flags":["interval"]}}]}' ;;
+    *) exit 19 ;;
+esac
 SH
 cat > "$tmp/bin/ping" <<'SH'
 #!/bin/sh
