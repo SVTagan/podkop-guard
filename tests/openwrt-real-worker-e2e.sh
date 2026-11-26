@@ -80,9 +80,10 @@ echo "VM_NAT_READY interface=$guest_if"
 # Use the real release-specific package database and real dependencies.
 # Preserve the package checks of the original 25.12 test.
 vm_pkg_update
-vm_pkg_install curl jq sing-box
+# Test-only module; let the release package manager enforce the kernel ABI.
+vm_pkg_install curl jq sing-box kmod-nft-tproxy
 
-for dep in curl jq sing-box; do
+for dep in curl jq sing-box kmod-nft-tproxy; do
     vm_pkg_installed "$dep" || {
         echo "FAIL_REAL_DEP_MISSING $dep" >&2
         exit 1
@@ -289,6 +290,10 @@ for marker in structure_partial structure_missing_set structure_wrong_hook struc
     grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
 done
 echo PASS_VM_B6_NFT_CHAINS_SETS_FIXTURES
+for marker in rules_empty rules_wrong_mark rules_missing_udp rules_wrong_range rules_missing_common rules_wrong_interface rules_wrong_port rules_wrong_addr rules_wrong_mask rules_missing_bypass rules_split_signature rules_wrong_chain rules_after_healthy rules_after_timeout rules_numeric; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+echo PASS_VM_B6_NFT_RULES_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

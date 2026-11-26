@@ -985,6 +985,46 @@ watch_nft_structure() {
         def set_ok($name; $type):
             objects("set"; $name) as $s |
             ($s|length) == 1 and ($s[0].type == $type);
+        # Required signatures must occur in the same rule and correct chain.
+        # This is deliberately not a semantic evaluator of the whole ruleset.
+        def rules($chain):
+            .nftables[] | .rule? | select(type == "object" and
+                .family == "inet" and .table == "PodkopTable" and .chain == $chain) |
+                .expr | select(type == "array");
+        def eq($left; $right):
+            any(.[]; .match? | .op == "==" and .left == $left and .right == $right);
+        def lookup($left; $right):
+            any(.[]; .match? | (.op == "==" or .op == "in") and
+                .left == $left and .right == $right);
+        def meta($key): {"meta":{"key":$key}};
+        def proto($name; $number):
+            eq(meta("l4proto"); $name) or eq(meta("l4proto"); $number);
+        def mark_path($chain; $dest; $name; $number):
+            any(rules($chain);
+                proto($name; $number) and
+                lookup({"payload":{"protocol":"ip","field":"daddr"}}; $dest) and
+                ($chain != "mangle" or lookup(meta("iifname"); "@interfaces")) and
+                any(.[]; .mangle? | .key == meta("mark") and .value == 1048576));
+        def mark_paths($chain):
+            {"prefix":{"addr":"198.18.0.0","len":15}} as $range |
+            mark_path($chain; $range; "tcp"; 6) and
+            mark_path($chain; $range; "udp"; 17) and
+            mark_path($chain; "@podkop_subnets"; "tcp"; 6) and
+            mark_path($chain; "@podkop_subnets"; "udp"; 17);
+        def proxy_path($name; $number):
+            any(rules("proxy");
+                proto($name; $number) and
+                any(.[]; .match? |
+                    .left == {"&":[{"meta":{"key":"mark"}},1048576]} and
+                    ((.op == "==" and .right == 1048576) or
+                     (.op == "!=" and .right == 0))) and
+                any(.[]; .tproxy? | .family == "ip" and
+                    .addr == "127.0.0.1" and .port == 1602));
+        def rules_ok:
+            mark_paths("mangle") and mark_paths("mangle_output") and
+            proxy_path("tcp"; 6) and proxy_path("udp"; 17) and
+            any(rules("mangle_output"); eq(meta("mark"); 2097152) and
+                any(.[]; has("return")));
         if length != 1 or (.[0]|type) != "object" or
            (.[0].nftables|type) != "array" then "unknown"
         else .[0] |
@@ -1003,13 +1043,14 @@ watch_nft_structure() {
                  chain_ok("proxy"; "filter"; "prerouting"; -100) and
                  set_ok("localv4"; "ipv4_addr") and
                  set_ok("podkop_subnets"; "ipv4_addr") and
-                 set_ok("interfaces"; "ifname") then "present"
+                 set_ok("interfaces"; "ifname") then
+                if rules_ok then "present" else "rules_incomplete" end
             else "unsupported"
             end
         end
     ' 2>/dev/null) || result=unknown
     case "$result" in
-        present|partial|unsupported) WATCH_NFT=$result ;;
+        present|partial|unsupported|rules_incomplete) WATCH_NFT=$result ;;
         *) WATCH_NFT=unknown ;;
     esac
 }
@@ -1022,6 +1063,7 @@ watch_nft_require_present() {
         present) return 0 ;;
         absent) reason=nft_table_absent ;;
         partial) reason=nft_structure_partial ;;
+        rules_incomplete) reason=nft_rules_incomplete; WATCH_NFT=partial ;;
         unsupported) reason=nft_structure_unsupported ;;
         *) reason=nft_table_unavailable ;;
     esac

@@ -12,6 +12,7 @@ on:
       - tests/openwrt-procd-lifecycle-e2e.sh
       - tests/openwrt-real-fakeip-e2e.sh
       - tests/watchdog-check.sh
+      - tests/nft-structure-fixture.json
       - tests/watchdog-procd.sh
       - tests/watchdog-monitor.sh
       - tests/watchdog-deadline.sh
@@ -78,7 +79,7 @@ jobs:
           mkdir -p vm-input
           cp install.sh podkop-guard podkop-guard.init tests/openwrt-vm-common.sh vm-input/
           cp tests/openwrt-installer-e2e.sh tests/openwrt-real-worker-e2e.sh tests/openwrt-multi-srs-e2e.sh vm-input/
-          cp tests/watchdog-check.sh tests/watchdog-monitor.sh tests/watchdog-procd.sh vm-input/
+          cp tests/watchdog-check.sh tests/watchdog-monitor.sh tests/watchdog-procd.sh tests/nft-structure-fixture.json vm-input/
           cp tests/watchdog-deadline.sh tests/openwrt-procd-lifecycle-e2e.sh tests/openwrt-real-fakeip-e2e.sh vm-input/
           sh -n vm-input/openwrt-vm-common.sh
           sh -n vm-input/install.sh

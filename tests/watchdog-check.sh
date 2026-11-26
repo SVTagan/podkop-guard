@@ -8,6 +8,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir -p "$tmp/bin"
 mkdir -p "$tmp/proc" "$tmp/netfilter"
+WATCH_TEST_NFT_FIXTURE="$(cd "$(dirname "$0")" && pwd)/nft-structure-fixture.json"
+[ -r "$WATCH_TEST_NFT_FIXTURE" ]
+export WATCH_TEST_NFT_FIXTURE
 fixture_command_id=$(printf '%s' '2f7573722f62696e2f73696e672d626f780072756e00' | sha256sum)
 fixture_command_id=${fixture_command_id%% *}
 : > "$tmp/list.pid"
@@ -66,7 +69,7 @@ if [ "$*" = '-j -t list table inet PodkopTable' ]; then
         structure_bad_json) printf '{\n'; exit 0 ;;
         structure_multi_json) printf '{}\n{}\n'; exit 0 ;;
     esac
-    fixture='{"nftables":[{"metainfo":{"json_schema_version":1}},{"table":{"family":"inet","name":"PodkopTable","handle":7}},{"chain":{"family":"inet","table":"PodkopTable","name":"mangle","type":"filter","hook":"prerouting","prio":-150,"policy":"accept","handle":8}},{"chain":{"family":"inet","table":"PodkopTable","name":"mangle_output","type":"route","hook":"output","prio":-150,"policy":"accept","handle":9}},{"chain":{"family":"inet","table":"PodkopTable","name":"proxy","type":"filter","hook":"prerouting","prio":-100,"policy":"accept","handle":10}},{"set":{"family":"inet","table":"PodkopTable","name":"localv4","type":"ipv4_addr","handle":11,"flags":["interval"]}},{"set":{"family":"inet","table":"PodkopTable","name":"podkop_subnets","type":"ipv4_addr","handle":12,"flags":["interval"]}},{"set":{"family":"inet","table":"PodkopTable","name":"interfaces","type":"ifname","handle":13,"flags":["interval"]}}]}'
+    fixture=$(cat "$WATCH_TEST_NFT_FIXTURE") || exit 1
     case "$WATCH_TEST_NFT" in
         structure_partial) filter='.nftables |= map(select(.chain.name? != "proxy"))' ;;
         structure_wrong_hook) filter='(.nftables[] | select(.chain.name? == "proxy") | .chain.hook) = "output"' ;;
@@ -79,6 +82,21 @@ if [ "$*" = '-j -t list table inet PodkopTable' ]; then
             if [ -e "$WATCH_TEST_DNS_CALLED" ]; then filter='.nftables |= map(select(.chain.name? != "proxy"))'; else filter=.; fi ;;
         structure_wrong_after_dns)
             if [ -e "$WATCH_TEST_DNS_CALLED" ]; then filter='(.nftables[] | select(.chain.name? == "mangle") | .chain.prio) = -100'; else filter=.; fi ;;
+        rules_empty) filter='.nftables |= map(select(has("rule")|not))' ;;
+        rules_wrong_mark) filter='(.nftables[] | select(.rule.chain? == "mangle_output") | .rule.expr[] | select(.mangle?) | .mangle.value) = 1048577' ;;
+        rules_missing_udp) filter='.nftables |= map(select((.rule.chain? == "proxy" and any(.rule.expr[]; .match.right? == "udp"))|not))' ;;
+        rules_wrong_range) filter='(.nftables[] | select(.rule.chain? == "mangle") | .rule.expr[] | select(.match.right.prefix?) | .match.right.prefix.len) = 16' ;;
+        rules_missing_common) filter='.nftables |= map(select((.rule.chain? == "mangle_output" and any(.rule.expr[]; .match.right? == "@podkop_subnets"))|not))' ;;
+        rules_wrong_interface) filter='(.nftables[] | select(.rule.chain? == "mangle") | .rule.expr[] | select(.match.right? == "@interfaces") | .match.right) = "@other"' ;;
+        rules_wrong_port) filter='(.nftables[] | select(.rule.chain? == "proxy") | .rule.expr[] | select(.tproxy?) | .tproxy.port) = 1603' ;;
+        rules_wrong_addr) filter='(.nftables[] | select(.rule.chain? == "proxy") | .rule.expr[] | select(.tproxy?) | .tproxy.addr) = "127.0.0.2"' ;;
+        rules_wrong_mask) filter='(.nftables[] | select(.rule.chain? == "proxy") | .rule.expr[] | select(.match.left["&"]?) | .match.left["&"][1]) = 2097152' ;;
+        rules_missing_bypass) filter='.nftables |= map(select((.rule.chain? == "mangle_output" and any(.rule.expr[]; has("return")))|not))' ;;
+        rules_split_signature) filter='.nftables |= (map(if .rule.chain? == "proxy" then .rule.expr |= map(select(has("tproxy")|not)) else . end) + [.[] | select(.rule.chain? == "proxy") | .rule.expr |= map(select(has("tproxy")))])' ;;
+        rules_wrong_chain) filter='(.nftables[] | select(.rule.chain? == "proxy") | .rule.chain) = "mangle"' ;;
+        rules_after_dns)
+            if [ -e "$WATCH_TEST_DNS_CALLED" ]; then filter='.nftables |= map(select((.rule.chain? == "proxy" and any(.rule.expr[]; .match.right? == "udp"))|not))'; else filter=.; fi ;;
+        rules_numeric) filter='(.nftables[] | .rule? | select(type == "object") | .expr[] | select(.match.left.meta.key? == "l4proto") | .match.right) |= (if . == "tcp" then 6 else 17 end) | (.nftables[] | select(.rule.chain? == "proxy") | .rule.expr[] | select(.match.left["&"]?) | .match) |= (.op = "!=" | .right = 0)' ;;
         structure_extra)
             filter='.nftables += [{"set":{"family":"inet","table":"PodkopTable","name":"optional","type":"ipv4_addr"}},{"rule":{"family":"inet","table":"PodkopTable","chain":"mangle","expr":[{"counter":{"packets":1,"bytes":42}}]}}]' ;;
         *) filter=. ;;
@@ -88,7 +106,7 @@ if [ "$*" = '-j -t list table inet PodkopTable' ]; then
 fi
 [ "$*" = 'list tables' ] || exit 9
 case "$WATCH_TEST_NFT" in
-    present|structure_*) printf 'table inet PodkopTable\n' ;;
+    present|structure_*|rules_*) printf 'table inet PodkopTable\n' ;;
     absent) printf 'table inet fw4\n' ;;
     error) exit 1 ;;
     absent_after_dns)
@@ -257,6 +275,13 @@ case_run() {
         structure_wrong_after_*)
             case "$output" in *'reason=nft_structure_unsupported '*'nft=unsupported') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ -e "$tmp/dns-called" ] || exit 1 ;;
+        rules_after_*)
+            case "$output" in *'reason=nft_rules_incomplete '*'nft=partial') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        rules_numeric) ;;
+        rules_*)
+            case "$output" in *'reason=nft_rules_incomplete '*'dns=skipped nft=partial') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
         conntrack_unavailable|conntrack_invalid)
             case "$output" in *'reason=conntrack_unverified '*) ;; *)
                 echo "FAIL $name: missing unverified reason $output" >&2; exit 1 ;;
@@ -342,6 +367,12 @@ case_run structure_partial_after_timeout UNKNOWN 2 timeout structure_partial_aft
 case_run structure_wrong_after_healthy UNKNOWN 2 healthy structure_wrong_after_dns 12345 true 0 valid up
 case_run structure_wrong_after_timeout UNKNOWN 2 timeout structure_wrong_after_dns 12345 true 0 valid up
 case_run structure_extra HEALTHY_SAMPLED 0 healthy structure_extra 12345 true 0 valid up
+for scenario in rules_empty rules_wrong_mark rules_missing_udp rules_wrong_range rules_missing_common rules_wrong_interface rules_wrong_port rules_wrong_addr rules_wrong_mask rules_missing_bypass rules_split_signature rules_wrong_chain; do
+    case_run "$scenario" UNKNOWN 2 timeout "$scenario" 12345 true 0 valid up
+done
+case_run rules_after_healthy UNKNOWN 2 healthy rules_after_dns 12345 true 0 valid up
+case_run rules_after_timeout UNKNOWN 2 timeout rules_after_dns 12345 true 0 valid up
+case_run rules_numeric HEALTHY_SAMPLED 0 healthy rules_numeric 12345 true 0 valid up
 case_run procd_error      UNKNOWN                 2 healthy   present 12345 true  0 valid down
 case_run unsupported_cfg  UNKNOWN                 2 healthy   present 12345 true  0 bad   up
 
