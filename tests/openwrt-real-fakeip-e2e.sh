@@ -493,9 +493,9 @@ if grep -q 'state=HEALTHY_SAMPLED' "$tmp/manual-stop.log"; then fail manual_stop
 echo PASS_VM_B6_MANUAL_PROCD_STOP_EVIDENCE
 
 # Capture/inspect notifications only for this service and instance.
-# Both pinned procd sources emit thin instance.* payloads. The current
-# Guard decoder requires richer exit fields: log actual decoder output
-# for B6.2 without treating a thin payload as permission to act.
+# Both pinned procd sources emit thin instance.* payloads. Require
+# exact decoded notification-only states, not fabricated exit metadata.
+# These notifications are evidence only, not permission to act.
 stop_events
 for kind in instance.respawn instance.fail instance.stop; do
     jq -c --arg k "$kind" '
@@ -507,10 +507,17 @@ for kind in instance.respawn instance.fail instance.stop; do
         printf 'VM_B6_NOTIFICATION %s\n' "$event"
         decoded=$(printf '%s\n' "$event" | sh "$worker" watchdog-procd-event)
         printf 'VM_B6_DECODED %s\n' "$decoded"
+        case "$kind" in
+            instance.respawn) expected='PROCD_EVENT state=RESPAWN_REPORTED source=procd detail=notification_only action=none' ;;
+            instance.fail) expected='PROCD_EVENT state=CRASH_LOOP_REPORTED source=procd detail=notification_only action=none' ;;
+            instance.stop) expected='PROCD_EVENT state=STOPPED source=procd reason=undetermined action=none' ;;
+        esac
+        [ "$decoded" = "$expected" ] || fail "notification_decode_$kind"
         case "$decoded" in 'PROCD_EVENT '*'action=none') ;; *) fail notification_authority ;; esac
     done < "$tmp/$kind.jsonl"
 done
 echo PASS_VM_B6_REAL_PROCD_NOTIFICATION_EVIDENCE
+echo PASS_VM_B6_THIN_PROCD_NOTIFICATIONS
 assert_absent || fail final_respawn_cleanup
 [ ! -e /tmp/podkop-guard-probe.lock/active ] &&
     [ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ] || fail respawn_probe_slot_leak

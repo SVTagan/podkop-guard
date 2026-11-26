@@ -2136,6 +2136,12 @@ watchdog_procd_event() {
                 "PROCD_EVENT state=STARTED source=procd action=none"
             elif $kind == "STOP" then
                 "PROCD_EVENT state=STOPPED source=procd reason=undetermined action=none"
+            # Stock procd emits only service/instance. Recognize this
+            # exact shape without inventing exit metadata. Partial rich
+            # payloads still have to pass the existing strict checks.
+            elif ($d | keys) == ["instance","service"] then
+                (if $kind == "RESPAWN" then "RESPAWN_REPORTED" else "CRASH_LOOP_REPORTED" end) as $state |
+                "PROCD_EVENT state=\($state) source=procd detail=notification_only action=none"
             elif (($d.pid | integer) | not) or (($d.exit_code | integer) | not) or
                  (($d.respawn_count | integer) | not) or ($d.pid < 1) or
                  (($d.command | type) != "array") or

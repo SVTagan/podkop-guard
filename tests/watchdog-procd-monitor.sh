@@ -15,6 +15,8 @@ if [ "$#" -eq 3 ] && [ "$1 $2 $3" = '-S subscribe service' ]; then
     [ "$PROCD_B2_MODE" != fail_subscription ] || exit 9
     if [ "$PROCD_B2_MODE" = event ]; then
         printf '%s\n' '{"instance.respawn":{"service":"sing-box","instance":"sing-box.main","pid":100,"exit_code":1,"respawn_count":1,"command":["/usr/bin/sing-box","run"]}}'
+    elif [ "$PROCD_B2_MODE" = thin_event ]; then
+        printf '%s\n' '{"instance.respawn":{"service":"sing-box","instance":"sing-box.main"}}'
     fi
     exec sleep 60
 fi
@@ -91,6 +93,7 @@ case_run() {
 case_run normal quiet 'snapshot=RUNNING pid=100 history=INCOMPLETE action=none' 2
 case_run rebind rebind 'subscription=RESET reason=ubusd_changed' 4
 case_run event event 'event=RESPAWN_REPORTED diagnosis=UNCONFIRMED history=INCOMPLETE action=none' 3
+case_run thin_event thin_event 'event=RESPAWN_REPORTED diagnosis=UNCONFIRMED history=INCOMPLETE action=none' 3
 # A live Podkop list update/reload is not a license to call a procd event a
 # confirmed runtime defect, even when its type is instance.respawn.
 mkdir -p "$tmp/proc/321"

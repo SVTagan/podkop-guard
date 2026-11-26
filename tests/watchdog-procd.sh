@@ -57,6 +57,12 @@ event_case() {
 real='{"service":"sing-box","instance":"sing-box.main","pid":16524,"exit_code":137,"respawn_count":3,"command":["/usr/bin/sing-box","run","-c","/etc/sing-box/config.json"]}'
 event_case respawn 'PROCD_EVENT state=RESPAWN_REPORTED source=procd pid=16524 exit_code=137 respawn_count=3 action=none' "{\"instance.respawn\":$real}"
 event_case crash_loop 'PROCD_EVENT state=CRASH_LOOP_REPORTED source=procd pid=16524 exit_code=137 respawn_count=3 action=none' "{\"instance.fail\":$real}"
+# Exact thin notifications captured on both OpenWrt guests.
+event_case thin_respawn 'PROCD_EVENT state=RESPAWN_REPORTED source=procd detail=notification_only action=none' '{"instance.respawn":{"service":"sing-box","instance":"sing-box.main"}}'
+event_case thin_fail 'PROCD_EVENT state=CRASH_LOOP_REPORTED source=procd detail=notification_only action=none' '{"instance.fail":{"service":"sing-box","instance":"sing-box.main"}}'
+event_case thin_foreign 'PROCD_EVENT state=IGNORED reason=other_instance action=none' '{"instance.fail":{"service":"sing-box","instance":"validator"}}'
+event_case thin_partial_pid 'PROCD_EVENT state=UNKNOWN reason=invalid_exit_fields action=none' '{"instance.respawn":{"service":"sing-box","instance":"sing-box.main","pid":null}}'
+event_case thin_partial_command 'PROCD_EVENT state=UNKNOWN reason=invalid_exit_fields action=none' '{"instance.fail":{"service":"sing-box","instance":"sing-box.main","command":["/usr/bin/sing-box","run"]}}'
 event_case start 'PROCD_EVENT state=STARTED source=procd action=none' '{"instance.start":{"service":"sing-box","instance":"sing-box.main"}}'
 event_case stop 'PROCD_EVENT state=STOPPED source=procd reason=undetermined action=none' '{"instance.stop":{"service":"sing-box","instance":"sing-box.main"}}'
 event_case other_service 'PROCD_EVENT state=IGNORED reason=other_instance action=none' '{"instance.fail":{"service":"podkop-guard","instance":"instance1","pid":1}}'
