@@ -4,6 +4,62 @@
 set -eu
 . /mnt/pg-bundle/openwrt-vm-common.sh
 
+# Both serial phases run in the same disposable guest. The B6 suite must
+# inherit the completed core fixture, not recreate or repair its state.
+boundary_manifest=/tmp/pg-worker-b6.sha256
+verify_split_boundary() {
+    local service raw
+    cmp -s /usr/bin/podkop-guard /mnt/pg-bundle/podkop-guard
+    [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+    for service in sing-box podkop-guard; do
+        raw=$(ubus -t 3 call service list "{\"name\":\"$service\"}")
+        printf '%s\n' "$raw" | jq -e 'type == "object" and length == 0' >/dev/null
+    done
+    if pidof sing-box >/dev/null 2>&1; then
+        echo FAIL_VM_SPLIT_SING_BOX_ALIVE >&2; return 1
+    fi
+    [ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ]
+    [ ! -e /var/run/podkop_list_update.pid ] && [ ! -L /var/run/podkop_list_update.pid ]
+    [ ! -e /tmp/podkop-guard-probe.lock/active ]
+    [ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ]
+    [ -f /tmp/podkop-guard-probe.lock/lease ]
+    (
+        exec 7>>/tmp/podkop-guard-probe.lock/lease
+        flock -n 7
+    )
+}
+case "$#" in 1) ;; *) echo 'FAIL VM worker phase required' >&2; exit 1 ;; esac
+case "$1" in
+    core)
+        [ ! -e "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ]
+        ;;
+    finalize)
+        verify_split_boundary
+        [ -f "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ]
+        sha256sum -c "$boundary_manifest"
+        echo PASS_VM_B6_SPLIT_FINAL_PRECONDITIONS
+        # The real LKG daemon starts with default 300s startup grace. It must remain
+        # running under real procd, without performing any refresh in this short test.
+        # The independent watchdog uses the same actual source, opt-in only.
+        uci -q set podkop_guard.settings.watchdog_enabled=1
+        /etc/init.d/podkop-guard start
+        sleep 2
+        svc=$(ubus call service list '{"name":"podkop-guard"}')
+        printf '%s\n' "$svc" | grep -q '"instance1"'
+        printf '%s\n' "$svc" | grep -q '"watchdog"'
+        printf '%s\n' "$svc" | grep -q '"running": true'
+        /etc/init.d/podkop-guard running
+        [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+        echo PASS_VM_REAL_WORKER_PROCD_BOTH
+        
+        # Do not wait 60 seconds to stop the long sleeping LKG worker: the bounded
+        # workflow terminates the disposable QEMU instance after the check.
+        echo OPENWRT_REAL_WORKER_E2E_PASS
+        rm -f "$boundary_manifest"
+        exit 0 ;;
+    *) echo 'FAIL invalid VM worker phase' >&2; exit 1 ;;
+esac
+
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
 [ -r /mnt/pg-bundle/podkop-guard ]
 grep -q '^VERSION="0.3.0-dev"' /mnt/pg-bundle/podkop-guard
@@ -251,24 +307,11 @@ echo PASS_VM_B4_RESIDENT_BOUNDED
 # B5.2c.2: destructive lifecycle tests only inside this disposable guest.
 PG_DISPOSABLE_VM=1 sh /mnt/pg-bundle/openwrt-procd-lifecycle-e2e.sh
 
-# B6.1b.1: actual local FakeIP DNS and STOP/CONT of our own fixture.
-sh /mnt/pg-bundle/openwrt-real-fakeip-e2e.sh
 
-
-# The real LKG daemon starts with default 300s startup grace. It must remain
-# running under real procd, without performing any refresh in this short test.
-# The independent watchdog uses the same actual source, opt-in only.
-uci -q set podkop_guard.settings.watchdog_enabled=1
-/etc/init.d/podkop-guard start
-sleep 2
-svc=$(ubus call service list '{"name":"podkop-guard"}')
-printf '%s\n' "$svc" | grep -q '"instance1"'
-printf '%s\n' "$svc" | grep -q '"watchdog"'
-printf '%s\n' "$svc" | grep -q '"running": true'
-/etc/init.d/podkop-guard running
-[ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
-echo PASS_VM_REAL_WORKER_PROCD_BOTH
-
-# Do not wait 60 seconds to stop the long sleeping LKG worker: the bounded
-# workflow terminates the disposable QEMU instance after the check.
-echo OPENWRT_REAL_WORKER_E2E_PASS
+# The next serial command uses the exact same guest and worker, but a
+# separate bounded timeout. Preserve the LKG baseline across the split.
+verify_split_boundary
+sha256sum /usr/bin/podkop-guard /etc/podkop-guard/lkg-marker \
+    /etc/podkop-guard/lkg.srs /etc/podkop-guard/lkg-subnets.lst > "$boundary_manifest"
+echo PASS_VM_B6_SPLIT_CORE_PRECONDITIONS
+echo OPENWRT_REAL_WORKER_CORE_E2E_PASS

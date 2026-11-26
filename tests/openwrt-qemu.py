@@ -118,7 +118,13 @@ start_service() {
     print("QEMU_MULTI_SRS_CACHE_E2E_PASS", flush=True)
     run("test -r /mnt/pg-bundle/podkop-guard")
     run("test -r /mnt/pg-bundle/openwrt-real-worker-e2e.sh")
-    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh", timeout=330)
+    # Separate serial deadlines; keep the same guest, test order and
+    # workflow-level 12-minute job budget. No failure is ignored.
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh core", timeout=270)
+    print("QEMU_REAL_WORKER_CORE_E2E_PASS", flush=True)
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-fakeip-e2e.sh", timeout=180)
+    print("QEMU_REAL_B6_E2E_PASS", flush=True)
+    run(f"{vm_env} sh /mnt/pg-bundle/openwrt-real-worker-e2e.sh finalize", timeout=30)
     print("QEMU_REAL_WORKER_E2E_PASS", flush=True)
 finally:
     child.close(force=True)

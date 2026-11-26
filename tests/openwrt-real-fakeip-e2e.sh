@@ -6,6 +6,22 @@ set -eu
 worker=/usr/bin/podkop-guard
 [ -x "$worker" ]
 [ "$(cat /etc/podkop-guard/lkg-marker)" = unchanged-LKG ]
+# This suite is now a separate serial command in the same guest.
+# Refuse to run on a stale or unprepared core fixture.
+boundary_manifest=/tmp/pg-worker-b6.sha256
+[ -f "$boundary_manifest" ] && [ ! -L "$boundary_manifest" ]
+sha256sum -c "$boundary_manifest"
+cmp -s "$worker" /mnt/pg-bundle/podkop-guard
+raw_guard=$(ubus -t 3 call service list '{"name":"podkop-guard"}')
+printf '%s\n' "$raw_guard" | jq -e 'type == "object" and length == 0' >/dev/null
+[ ! -e /tmp/podkop-guard-probe.lock/active ]
+[ ! -e /tmp/podkop-guard-probe.lock/active.abandoned ]
+[ -f /tmp/podkop-guard-probe.lock/lease ]
+(
+    exec 7>>/tmp/podkop-guard-probe.lock/lease
+    flock -n 7
+)
+echo PASS_VM_B6_SPLIT_REAL_PRECONDITIONS
 tmp=$(mktemp -d /tmp/pg-fakeip.XXXXXX)
 owned=0
 box=
@@ -697,3 +713,10 @@ sha256sum /etc/podkop-guard/lkg-marker /etc/podkop-guard/lkg.srs \
     /etc/podkop-guard/lkg-subnets.lst > "$tmp/lkg.after"
 cmp -s "$tmp/lkg.before" "$tmp/lkg.after" || fail maintenance_lkg_changed
 echo PASS_VM_B6_REAL_MAINTENANCE_EVIDENCE
+# Verify cross-suite baseline, in addition to the original per-fixture hashes.
+sha256sum -c "$boundary_manifest"
+(
+    exec 7>>/tmp/podkop-guard-probe.lock/lease
+    flock -n 7
+)
+echo PASS_VM_B6_SPLIT_REAL_POSTCONDITIONS
