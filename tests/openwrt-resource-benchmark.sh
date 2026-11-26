@@ -58,10 +58,23 @@ resource_benchmark() (
     for pid in $sleepers; do kill -TERM "$pid" 2>/dev/null || :; done
     for pid in $sleepers; do wait "$pid" 2>/dev/null || :; done
     sleepers=
-    # Real local DNS silence, not a synthetic nslookup timeout.
+    # Real local DNS silence with explicit conntrack evidence fixtures.
+    # The minimal guest need not expose usable native conntrack counters.
+    for key in nf_conntrack_count nf_conntrack_max; do
+        value=$(cat "/proc/sys/net/netfilter/$key" 2>/dev/null) || value=unavailable
+        case "$value" in unavailable) ;; ''|*[!0-9]*) value=invalid ;; esac
+        printf 'PG_RESOURCE_CONNTRACK source=native key=%s value=%s\n' "$key" "$value"
+    done
+    mkdir "$tmp/conntrack-missing"
+    printf '1\n' > "$tmp/conntrack/nf_conntrack_count"
+    printf '1000\n' > "$tmp/conntrack/nf_conntrack_max"
     our_box || exit 1
     kill -STOP "$box"
-    sample_series dns_timeout 3 'state=SUSPECT_DNS_TIMEOUT ' 1
+    export PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/conntrack-missing"
+    sample_series dns_timeout_unverified 1 'state=UNKNOWN reason=conntrack_unverified ' 2
+    export PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/conntrack"
+    sample_series dns_timeout_normal_fixture 3 'state=SUSPECT_DNS_TIMEOUT ' 1
+    unset PODKOP_GUARD_WATCH_CONNTRACK_ROOT
     resume_box || exit 1
     sample_series restored 1 'state=HEALTHY_SAMPLED ' 0
     [ ! -e /usr/bin/podkop ] && [ ! -L /usr/bin/podkop ] || exit 1
@@ -80,7 +93,8 @@ SH
     rm -f /usr/bin/podkop
     # Monitor sleep and active samples; outside_slot_* is a sampled proxy, not PSS.
     printf 'PG_RESOURCE_SAMPLE case=monitor_3x5 index=1 config_bytes=%s\n' "$(wc -c < "$tmp/box.json")"
-    "$meter" "$worker" watchdog-monitor 3 5 > "$tmp/resource-monitor.log" 2>&1
+    PODKOP_GUARD_WATCH_GRACE=0 PODKOP_GUARD_WATCH_CHANGES_ONLY=0 \
+        "$meter" "$worker" watchdog-monitor 3 5 > "$tmp/resource-monitor.log" 2>&1
     cat "$tmp/resource-monitor.log"
     grep -Fxq 'MONITOR_END completed=3 confirmations=0 action=none' "$tmp/resource-monitor.log"
     [ "$(grep -c 'state=HEALTHY_SAMPLED phase=HEALTHY' "$tmp/resource-monitor.log")" -eq 3 ]
