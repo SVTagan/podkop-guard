@@ -199,6 +199,30 @@ verify() {
     passed=$((passed + 1))
     printf 'PASS %s\n' "$name"
 }
+# Read once: a reaped child can disappear between a readability test
+# and cat. Absence and zombies are safe; a still-present but unreadable
+# proc record is NOT evidence of cleanup. Do not signal a marker PID.
+test_child_quiescent() (
+    pid=$1
+    case "$pid" in ''|*[!0-9]*) exit 2 ;; esac
+    [ "$pid" -gt 1 ] || exit 2
+    if stat=$(cat "/proc/$pid/stat" 2>/dev/null); then
+        [ "${stat%% *}" = "$pid" ] || exit 2
+        case "$stat" in
+            *') '*) rest=${stat##*) } ;;
+            *) exit 2 ;;
+        esac
+        set -- $rest
+        [ "$#" -ge 20 ] || exit 2
+        case "$1" in
+            Z) exit 0 ;;
+            *) exit 1 ;;
+        esac
+    fi
+    # A disappearing proc entry is normal. If the PID directory still
+    # exists, fail closed (or let the caller retry within its deadline).
+    [ ! -d "/proc/$pid" ] || exit 2
+)
 quick_start=$(date +%s)
 verify healthy 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' 0 healthy
 verify suspect 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=123 dns=timeout nft=present' 1 suspect
@@ -215,12 +239,9 @@ deadline_elapsed=$(( $(date +%s) - deadline_start ))
 }
 read -r pid < "$tmp/childpid"
 case "$pid" in ''|*[!0-9]*) echo 'FAIL invalid child PID' >&2; exit 1 ;; esac
-if [ -r "/proc/$pid/stat" ]; then
-    stat=$(cat "/proc/$pid/stat")
-    case "$stat" in *') Z '*) ;; *)
-        echo "FAIL diagnostic child remains running: $pid" >&2; exit 1 ;;
-    esac
-fi
+test_child_quiescent "$pid" || {
+    echo "FAIL diagnostic child still running or identity unreadable: $pid" >&2; exit 1;
+}
 passed=$((passed + 1))
 echo 'PASS no_running_orphan'
 for bad in 0 2 121 abc; do
@@ -271,12 +292,11 @@ for signal in TERM KILL; do
     wait "$controller" 2>/dev/null || :
     tries=0
     while [ "$tries" -lt 55 ]; do
-        alive=0
-        if [ -r "/proc/$child/stat" ]; then
-            stat=$(cat "/proc/$child/stat")
-            case "$stat" in *') Z '*) ;; *) alive=1 ;; esac
+        alive=1
+        if test_child_quiescent "$child"; then
+            alive=0
+            break
         fi
-        [ "$alive" -eq 0 ] && break
         tries=$((tries + 1))
         sleep 0.1 2>/dev/null || sleep 1
     done
@@ -317,12 +337,9 @@ for fixture in background_result leader_gone guard_gone; do
     [ "$elapsed" -lt 15 ] || { echo "FAIL $fixture elapsed=$elapsed" >&2; exit 1; }
     read -r child < "$tmp/childpid"
     case "$child" in ''|*[!0-9]*) exit 1 ;; esac
-    if [ -r "/proc/$child/stat" ]; then
-        stat=$(cat "/proc/$child/stat")
-        case "$stat" in *') Z '*) ;; *)
-            echo "FAIL $fixture running child $child" >&2; exit 1 ;;
-        esac
-    fi
+    test_child_quiescent "$child" || {
+        echo "FAIL $fixture running or unreadable child $child" >&2; exit 1;
+    }
     passed=$((passed + 1))
     printf 'PASS %s_no_running_orphan\n' "$fixture"
 done
