@@ -1236,7 +1236,7 @@ watch_config_check() {
                 if type == "string" then . == $value
                 elif type == "array" then all(.[]; type == "string") and any(.[]; . == $value)
                 else false end;
-            def only($keys): (keys - $keys | length) == 0;
+            def only($allowed): (keys - $allowed | length) == 0;
             def dns_in:
                 [.inbounds[] | select(.tag == "dns-in")] as $in |
                 ($in|length) == 1 and ($in[0] |
