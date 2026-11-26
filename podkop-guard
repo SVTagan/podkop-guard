@@ -1223,13 +1223,54 @@ watch_config_path() {
     return 0
 }
 
+# Inspect only the supported local DNS path. The validated canonical JSON
+# is private and transient; its digest is a sampled disk generation, not
+# proof of the configuration loaded in the running process.
 watch_config_check() {
+    local validated
+    WATCH_CONFIG_ID=
     if watch_config_path "$1"; then
         WATCH_CONFIG_REASON=unsupported_dns_config
-        # The layout contract will be strengthened separately; never log JSON.
-        if jq -es 'length == 1 and (.[0].inbounds |
-            any(.[]?; .tag == "dns-in" and .listen == "127.0.0.42" and .listen_port == 53))'             "$WATCH_CONFIG_PATH" >/dev/null 2>&1; then
-            return 0
+        validated=$(jq -cesS '
+            def includes($value):
+                if type == "string" then . == $value
+                elif type == "array" then all(.[]; type == "string") and any(.[]; . == $value)
+                else false end;
+            def only($keys): (keys - $keys | length) == 0;
+            def dns_in:
+                [.inbounds[] | select(.tag == "dns-in")] as $in |
+                ($in|length) == 1 and ($in[0] |
+                    .type == "direct" and .listen == "127.0.0.42" and
+                    .listen_port == 53 and (.network == null or .network == "udp") and
+                    .override_address == null and .override_port == null);
+            def fakeip_server:
+                [.dns.servers[] | select(.tag == "fakeip-server")] as $s |
+                ($s|length) == 1 and ($s[0] |
+                    .type == "fakeip" and .inet4_range == "198.18.0.0/15");
+            def service_rule:
+                any(.dns.rules[]; .action == "route" and .server == "fakeip-server" and
+                    (.domain | includes("fakeip.podkop.fyi")) and
+                    (.type == null or .type == "default") and
+                    only(["action","server","domain","rewrite_ttl","type","__service_tag"]));
+            def dns_route:
+                reduce .route.rules[] as $r ({sniff:false,ok:false};
+                    if ($r | .action == "sniff" and (.inbound | includes("dns-in")) and
+                        only(["action","inbound","__service_tag"])) then .sniff = true
+                    elif .sniff and ($r | .action == "hijack-dns" and
+                        (.protocol | includes("dns")) and
+                        (.inbound == null or (.inbound | includes("dns-in"))) and
+                        only(["action","protocol","inbound","__service_tag"])) then .ok = true
+                    else . end) | .ok;
+            if length == 1 then .[0] |
+                select(type == "object" and (.inbounds|type) == "array" and
+                    (.dns.servers|type) == "array" and (.dns.rules|type) == "array" and
+                    (.route.rules|type) == "array" and dns_in and fakeip_server and
+                    service_rule and dns_route)
+            else empty end
+        ' "$WATCH_CONFIG_PATH" 2>/dev/null) &&
+        [ -n "$validated" ]; then
+            WATCH_CONFIG_REASON=dns_config_identity_unavailable
+            WATCH_CONFIG_ID=$(watch_command_id "$validated") && return 0
         fi
     fi
     printf 'WATCHDOG state=UNKNOWN reason=%s pid=%s dns=%s nft=%s\n' "$WATCH_CONFIG_REASON" "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
@@ -1237,7 +1278,7 @@ watch_config_check() {
 }
 
 watchdog_check() {
-    local tool shutdown check_pid rc check_birth check_bus current_birth control_identity initial_procd_state check_argv command_id
+    local tool shutdown check_pid rc check_birth check_bus current_birth control_identity initial_procd_state check_argv command_id check_config_id
     WATCH_PID="none"
     WATCH_RUNNING="unknown"
     WATCH_NFT="unknown"
@@ -1329,7 +1370,8 @@ watchdog_check() {
         return 2
     }
     watch_config_check "$check_argv" || return 2
-    control_identity="$check_pid:$check_birth:$check_bus:$command_id"
+    check_config_id=$WATCH_CONFIG_ID
+    control_identity="$check_pid:$check_birth:$check_bus:$command_id:$check_config_id"
     watch_probe_dns
     # Collect loopback evidence before the final identity checks so a
     # replacement during ping cannot validate an old baseline.
@@ -1377,8 +1419,12 @@ watchdog_check() {
     watch_nft_structure
     watch_nft_require_present || return 2
     watch_config_check "$check_argv" || return 2
+    if [ "$WATCH_CONFIG_ID" != "$check_config_id" ]; then
+        printf 'WATCHDOG state=TRANSITION reason=dns_config_changed pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+        return 0
+    fi
     if [ "$WATCH_DNS" = "fakeip" ] && [ "$WATCH_NFT" = "present" ]; then
-        printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present loopback=%s birth=%s bus=%s command_id=%s\n' "$WATCH_PID" "$WATCH_LOOPBACK" "$check_birth" "$check_bus" "$command_id"
+        printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present loopback=%s birth=%s bus=%s command_id=%s config_id=%s\n' "$WATCH_PID" "$WATCH_LOOPBACK" "$check_birth" "$check_bus" "$command_id" "$check_config_id"
         return 0
     fi
     if [ "$WATCH_DNS" = "timeout" ]; then
@@ -1397,7 +1443,7 @@ watchdog_check() {
             printf 'WATCHDOG state=UNKNOWN reason=loopback_unresponsive pid=%s dns=timeout nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
             return 2
         fi
-        printf 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=%s dns=timeout nft=%s birth=%s bus=%s command_id=%s\n' "$WATCH_PID" "$WATCH_NFT" "$check_birth" "$check_bus" "$command_id"
+        printf 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=%s dns=timeout nft=%s birth=%s bus=%s command_id=%s config_id=%s\n' "$WATCH_PID" "$WATCH_NFT" "$check_birth" "$check_bus" "$command_id" "$check_config_id"
         return 1
     fi
     printf 'WATCHDOG state=UNKNOWN pid=%s dns=%s nft=%s\n' "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
@@ -1815,7 +1861,7 @@ watchdog_monitor() {
     local missing_active streak streak_kind phase confirmations startup_deadline
     local stopped late_probe sample_elapsed max_sample display_cycles changes_only last_phase last_state
     local control_identity control_attempts control_probe sample_reason
-    local birth bus identity last_bus command_id maintenance_max maintenance_since
+    local birth bus identity last_bus command_id config_id maintenance_max maintenance_since
 
     [ "$#" -le 2 ] || {
         err "usage: podkop-guard watchdog-monitor [cycles 1..30] [interval_seconds 0..300]"
@@ -1918,6 +1964,7 @@ watchdog_monitor() {
         bus=
         identity=
         command_id=
+        config_id=
         case "$sample_output" in
             'WATCHDOG state='*)
                 payload=${sample_output#WATCHDOG state=}
@@ -1943,9 +1990,10 @@ watchdog_monitor() {
             HEALTHY_SAMPLED|SUSPECT_DNS_TIMEOUT)
                 case " $sample_output " in *' birth='*) rest=${sample_output#* birth=}; birth=${rest%% *} ;; esac
                 case " $sample_output " in *' command_id='*) rest=${sample_output#* command_id=}; command_id=${rest%% *} ;; esac
+                case " $sample_output " in *' config_id='*) rest=${sample_output#* config_id=}; config_id=${rest%% *} ;; esac
                 if watch_monitor_number "$pid" && watch_monitor_number "$birth" &&
-                   watch_valid_command_id "$command_id"; then
-                    identity="$pid:$birth:$bus:$command_id"
+                   watch_valid_command_id "$command_id" && watch_valid_command_id "$config_id"; then
+                    identity="$pid:$birth:$bus:$command_id:$config_id"
                 else state=UNKNOWN
                 fi ;;
         esac
@@ -1955,7 +2003,7 @@ watchdog_monitor() {
                 rest=${sample_output#* reason=}
                 sample_reason=${rest%% *}
                 case "$sample_reason" in
-                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|procd_registration_changed|unsupported_dns_config|procd_returned|procd_pid_changed|runtime_identity_unavailable|runtime_identity_changed|ubusd_identity_unavailable|ubusd_changed|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
+                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|procd_registration_changed|unsupported_dns_config|dns_config_path_unavailable|dns_config_path_mismatch|dns_config_file_unavailable|dns_config_identity_unavailable|dns_config_changed|nft_table_absent|nft_table_unavailable|nft_structure_partial|nft_structure_unsupported|nft_rules_incomplete|procd_returned|procd_pid_changed|runtime_identity_unavailable|runtime_identity_changed|ubusd_identity_unavailable|ubusd_changed|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
                     *) sample_reason="" ;;
                 esac ;;
         esac

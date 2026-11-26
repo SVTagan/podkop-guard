@@ -250,6 +250,22 @@ jq -e '.nftables | type == "array" and (all(.[] | .set? | select(type == "object
 "$worker" watchdog-check > "$tmp/nft-real-ok.log" ||
     { cat "$tmp/nft-real-ok.log"; cat "$tmp/nft-terse.json"; fail nft_real_positive; }
 grep -Fq 'state=HEALTHY_SAMPLED ' "$tmp/nft-real-ok.log" || fail nft_real_positive_state
+# The running process retains its loaded config. Modify only our disk
+# fixture and prove the worker refuses to validate the stale layout.
+cp "$tmp/box.json" "$tmp/box.before"
+jq 'del(.dns.rules)' "$tmp/box.before" > "$tmp/box.next"
+mv "$tmp/box.next" "$tmp/box.json"
+cfg_rc=0
+"$worker" watchdog-check > "$tmp/config-layout.log" || cfg_rc=$?
+mv "$tmp/box.before" "$tmp/box.json"
+[ "$cfg_rc" -eq 2 ] &&
+    grep -Fq 'state=UNKNOWN reason=unsupported_dns_config ' "$tmp/config-layout.log" ||
+    { cat "$tmp/config-layout.log"; fail dns_layout_real_negative; }
+our_box || fail dns_layout_process_changed
+"$worker" watchdog-check > "$tmp/config-restored.log" ||
+    { cat "$tmp/config-restored.log"; fail dns_layout_restored; }
+grep -Fq 'state=HEALTHY_SAMPLED ' "$tmp/config-restored.log" || fail dns_layout_restored_state
+echo PASS_VM_B6_REAL_DNS_LAYOUT
 # All mandatory chains/sets still exist, but TPROXY has disappeared.
 nft flush chain inet PodkopTable proxy
 nft_rc=0

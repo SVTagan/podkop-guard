@@ -13,6 +13,10 @@ WATCH_TEST_NFT_FIXTURE="$(cd "$(dirname "$0")" && pwd)/nft-structure-fixture.jso
 export WATCH_TEST_NFT_FIXTURE
 fixture_command_id=$(printf '%s\000' /usr/bin/sing-box run -c "$tmp/config.json" -D "$tmp" | LC_ALL=C hexdump -v -e '1/1 "%02x"' | sha256sum)
 fixture_command_id=${fixture_command_id%% *}
+fixture_config='{"log":{"level":"warn"},"dns":{"servers":[{"type":"udp","tag":"unused-local","server":"127.0.0.1","server_port":9},{"type":"fakeip","tag":"fakeip-server","inet4_range":"198.18.0.0/15"}],"rules":[{"domain":["fakeip.podkop.fyi","ip.podkop.fyi"],"action":"route","server":"fakeip-server","rewrite_ttl":60}],"final":"unused-local","strategy":"ipv4_only"},"inbounds":[{"type":"direct","tag":"dns-in","listen":"127.0.0.42","listen_port":53}],"outbounds":[{"type":"direct","tag":"direct-out"}],"route":{"rules":[{"inbound":["dns-in"],"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}],"final":"direct-out","default_domain_resolver":"unused-local"}}'
+fixture_config_id=$(printf '%s\n' "$fixture_config" | jq -cS .)
+fixture_config_id=$(printf '%s' "$fixture_config_id" | sha256sum)
+fixture_config_id=${fixture_config_id%% *}
 : > "$tmp/list.pid"
 make_birth() {
     mkdir -p "$tmp/proc/$1"
@@ -152,7 +156,10 @@ case "${WATCH_TEST_ID_CHANGE:-}" in
 esac
 case "$WATCH_TEST_CONFIG_CASE" in
     path_file_lost_after_dns) rm -f "$WATCH_TEST_POD_CONFIG" ;;
-    path_layout_changed_after_dns) printf '{}\n' > "$WATCH_TEST_POD_CONFIG" ;;
+    path_layout_changed_after_dns|layout_invalid_after_dns) printf '{}\n' > "$WATCH_TEST_POD_CONFIG" ;;
+    layout_changed_healthy|layout_changed_timeout)
+        jq '.log.level = "error"' "$WATCH_TEST_POD_CONFIG" > "$WATCH_TEST_POD_CONFIG.next" || exit 9
+        mv "$WATCH_TEST_POD_CONFIG.next" "$WATCH_TEST_POD_CONFIG" ;;
 esac
 case "${WATCH_TEST_DNS_MAINTENANCE:-}" in
     reload) mkdir -p "$PODKOP_GUARD_WATCH_PROC_ROOT/321"
@@ -191,9 +198,33 @@ case_run() {
     procd=$1
     rm -f "$tmp/pid-counter" "$tmp/dns-called"
     if [ "$config" = valid ]; then
-        printf '%s\n' '{"inbounds":[{"tag":"dns-in","listen":"127.0.0.42","listen_port":53}]}' > "$tmp/config.json"
+        printf '%s\n' "$fixture_config" > "$tmp/config.json"
     else
         printf '{}\n' > "$tmp/config.json"
+    fi
+    case "$name" in
+        layout_wrong_inbound_type) filter='.inbounds[0].type = "socks"' ;;
+        layout_tcp_only) filter='.inbounds[0].network = "tcp"' ;;
+        layout_duplicate_inbound) filter='.inbounds += [.inbounds[0]]' ;;
+        layout_wrong_listen) filter='.inbounds[0].listen = "127.0.0.1"' ;;
+        layout_no_fakeip) filter='.dns.servers |= map(select(.tag != "fakeip-server"))' ;;
+        layout_wrong_range) filter='.dns.servers[1].inet4_range = "198.18.0.0/16"' ;;
+        layout_duplicate_server) filter='.dns.servers += [.dns.servers[1]]' ;;
+        layout_wrong_domain) filter='.dns.rules[0].domain = ["other.example"]' ;;
+        layout_wrong_server) filter='.dns.rules[0].server = "unused-local"' ;;
+        layout_conditional_rule) filter='.dns.rules[0].rule_set = ["other"]' ;;
+        layout_no_sniff) filter='.route.rules |= map(select(.action != "sniff"))' ;;
+        layout_wrong_sniff) filter='.route.rules[0].inbound = ["other"]' ;;
+        layout_no_hijack) filter='.route.rules |= map(select(.action != "hijack-dns"))' ;;
+        layout_wrong_hijack) filter='.route.rules[1].protocol = "http"' ;;
+        layout_reversed_route) filter='.route.rules |= reverse' ;;
+        layout_scalar_fields) filter='.dns.rules[0].domain = "fakeip.podkop.fyi" | .route.rules[0].inbound = "dns-in" | .route.rules[1].protocol = ["dns"]' ;;
+        layout_extra_rules) filter='.dns.rules += [{"action":"reject","domain":["other.example"]}] | .route.rules += [{"action":"route","outbound":"direct-out","inbound":["other"]}]' ;;
+        *) filter= ;;
+    esac
+    if [ -n "$filter" ]; then
+        jq "$filter" "$tmp/config.json" > "$tmp/config.next"
+        mv "$tmp/config.next" "$tmp/config.json"
     fi
     cfg_path="$tmp/config.json"
     pod_path=$cfg_path
@@ -338,6 +369,16 @@ case_run() {
         path_layout_changed_after_dns)
             case "$output" in *'reason=unsupported_dns_config '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ -e "$tmp/dns-called" ] || exit 1 ;;
+        layout_changed_*)
+            case "$output" in *'reason=dns_config_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        layout_invalid_after_dns)
+            case "$output" in *'reason=unsupported_dns_config '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        layout_scalar_fields|layout_extra_rules) ;;
+        layout_*)
+            case "$output" in *'reason=unsupported_dns_config '*'dns=skipped '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
         conntrack_unavailable|conntrack_invalid)
             case "$output" in *'reason=conntrack_unverified '*) ;; *)
                 echo "FAIL $name: missing unverified reason $output" >&2; exit 1 ;;
@@ -381,7 +422,7 @@ case_run() {
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
     esac
     case "$name" in
-        healthy) case "$output" in *" birth=1000 bus=700:2000 command_id=$fixture_command_id") ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
+        healthy) case "$output" in *" birth=1000 bus=700:2000 command_id=$fixture_command_id config_id=$fixture_config_id") ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
         same_pid_birth_changed*) case "$output" in *'reason=runtime_identity_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         bus_identity_changed*) case "$output" in *'reason=ubusd_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         wrong_exe|deleted_exe|missing_exe|wrong_argv|missing_argv|truncated_argv|extra_argv)
@@ -441,6 +482,15 @@ case_run path_file_lost_after_dns UNKNOWN 2 healthy present 12345 true 0 valid u
 case_run path_layout_changed_after_dns UNKNOWN 2 healthy present 12345 true 0 valid up
 case_run path_no_workdir HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 case_run path_space HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+for scenario in layout_wrong_inbound_type layout_tcp_only layout_duplicate_inbound layout_wrong_listen layout_no_fakeip layout_wrong_range layout_duplicate_server layout_wrong_domain layout_wrong_server layout_conditional_rule layout_no_sniff layout_wrong_sniff layout_no_hijack layout_wrong_hijack layout_reversed_route; do
+    case_run "$scenario" UNKNOWN 2 timeout present 12345 true 0 valid up
+done
+for scenario in layout_scalar_fields layout_extra_rules; do
+    case_run "$scenario" HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+done
+case_run layout_changed_healthy TRANSITION 0 healthy present 12345 true 0 valid up
+case_run layout_changed_timeout TRANSITION 0 timeout present 12345 true 0 valid up
+case_run layout_invalid_after_dns UNKNOWN 2 healthy present 12345 true 0 valid up
 
 
 # A stale PID file is not proof of a running updater.
@@ -483,12 +533,12 @@ export PODKOP_GUARD_WATCH_CONTROL_PROBE WATCH_TEST_PING
 case_run control_healthy HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 WATCH_TEST_PING=down
 case_run control_filtered HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
-PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID="12345:1000:700:2000:$fixture_command_id"
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID="12345:1000:700:2000:$fixture_command_id:$fixture_config_id"
 export PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID
 case_run control_suppresses_suspect UNKNOWN 2 timeout present 12345 true 0 valid up
 WATCH_TEST_PING=up
 case_run control_recovers SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
-PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID="12345:999:700:2000:$fixture_command_id"
+PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID="12345:999:700:2000:$fixture_command_id:$fixture_config_id"
 case_run old_pid_no_control SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
 unset PODKOP_GUARD_WATCH_CONTROL_PROBE PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID WATCH_TEST_PING
 

@@ -63,7 +63,7 @@ if pidof sing-box >/dev/null 2>&1; then
     fail live_process_after_preflight
 fi
 cat > "$tmp/box.json" <<'JSON'
-{"log":{"disabled":true},"inbounds":[{"type":"socks","tag":"test-in","listen":"127.0.0.1","listen_port":17893},{"type":"direct","tag":"dns-in","listen":"127.0.0.42","listen_port":53}],"outbounds":[{"type":"direct","tag":"direct"}]}
+{"log":{"disabled":true},"dns":{"servers":[{"type":"udp","tag":"unused-local","server":"127.0.0.1","server_port":9},{"type":"fakeip","tag":"fakeip-server","inet4_range":"198.18.0.0/15"}],"rules":[{"domain":["fakeip.podkop.fyi","ip.podkop.fyi"],"action":"route","server":"fakeip-server","rewrite_ttl":60}],"final":"unused-local","strategy":"ipv4_only"},"inbounds":[{"type":"socks","tag":"test-in","listen":"127.0.0.1","listen_port":17893},{"type":"direct","tag":"dns-in","listen":"127.0.0.42","listen_port":53}],"outbounds":[{"type":"direct","tag":"direct-out"}],"route":{"rules":[{"inbound":["dns-in"],"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}],"final":"direct-out","default_domain_resolver":"unused-local"}}
 JSON
 /usr/bin/sing-box check -c "$tmp/box.json"
 # The worker must read the actual runtime file, not a second fixture.

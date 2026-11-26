@@ -298,6 +298,13 @@ for marker in path_missing_uci path_missing_conffile path_relative path_uci_mism
     grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
 done
 echo PASS_VM_B6_DNS_CONFIG_PATH_FIXTURES
+for marker in layout_wrong_inbound_type layout_tcp_only layout_duplicate_inbound layout_wrong_listen layout_no_fakeip layout_wrong_range layout_duplicate_server layout_wrong_domain layout_wrong_server layout_conditional_rule layout_no_sniff layout_wrong_sniff layout_no_hijack layout_wrong_hijack layout_reversed_route layout_scalar_fields layout_extra_rules layout_changed_healthy layout_changed_timeout layout_invalid_after_dns; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+for marker in config_changed config_rearmed config_missing config_invalid config_change_discards_loopback config_transition_reason nft_reason_preserved config_path_reason_preserved; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
+done
+echo PASS_VM_B6_DNS_LAYOUT_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

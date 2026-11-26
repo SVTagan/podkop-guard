@@ -19,7 +19,7 @@ line=$(sed -n "${counter}p" "$MONITOR_TEST_FIXTURE")
 [ -n "$line" ] || exit 9
 oldifs=$IFS
 IFS='|'
-read -r state pid rc simulated_uptime reason birth bus command_id <<EOF
+read -r state pid rc simulated_uptime reason birth bus command_id config_id <<EOF
 $line
 EOF
 IFS=$oldifs
@@ -35,6 +35,7 @@ fi
 birth=${birth:-1000}
 bus=${bus:-700:2000}
 command_id=${command_id:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+config_id=${config_id:-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
 suffix=
 if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
     if [ "$state" = HEALTHY_SAMPLED ] &&
@@ -42,7 +43,7 @@ if [ "${MONITOR_TEST_CONTROL_MODE:-0}" = 1 ]; then
         suffix=' loopback=ok'
     fi
     if [ "$state" = SUSPECT_DNS_TIMEOUT ] &&
-       [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID:-}" = "$pid:$birth:$bus:$command_id" ]; then
+       [ "${PODKOP_GUARD_WATCH_LOOPBACK_BASELINE_ID:-}" = "$pid:$birth:$bus:$command_id:$config_id" ]; then
         state=UNKNOWN
         rc=2
         suffix=' reason=loopback_unresponsive'
@@ -52,6 +53,7 @@ if [ -n "$reason" ]; then suffix="$suffix reason=$reason"; fi
 [ "$birth" = - ] || suffix="$suffix birth=$birth"
 [ "$bus" = - ] || suffix="$suffix bus=$bus"
 [ "$command_id" = - ] || suffix="$suffix command_id=$command_id"
+[ "$config_id" = - ] || suffix="$suffix config_id=$config_id"
 printf 'WATCHDOG state=%s pid=%s mock=yes%s\n' "$state" "$pid" "$suffix"
 exit "$rc"
 SH
@@ -101,7 +103,7 @@ run_case() {
            printf 'DIAG bounded rc=%s output=%s\n' "$diag_rc" "$diag" >&2
            exit 1 ;;
     esac
-    case "$output" in *'command_id='*) echo "FAIL $name leaked command identity" >&2; exit 1 ;; esac
+    case "$output" in *'command_id='*|*'config_id='*) echo "FAIL $name leaked runtime identity" >&2; exit 1 ;; esac
     case "$output" in
         *"MONITOR_END completed=$# confirmations=$confirmations action=none"*) ;;
         *) printf 'FAIL %s: wrong confirmations:\n%s\n' "$name" "$output" >&2; exit 1 ;;
@@ -201,6 +203,25 @@ export MONITOR_TEST_CONTROL_MODE
 run_case command_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
     "$H" "$T_CMD"
 unset MONITOR_TEST_CONTROL_MODE
+# Same process and argv, changed sampled disk generation.
+H_CFG='HEALTHY_SAMPLED|101|0|||1000|700:2000|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+T_CFG='SUSPECT_DNS_TIMEOUT|101|1|||1000|700:2000|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+run_case config_changed 'sample=5/5 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T" "$T_CFG" "$T_CFG" "$T_CFG"
+run_case config_rearmed 'sample=6/6 state=SUSPECT_DNS_TIMEOUT phase=CONFIRMED pid=101 streak=3' 1 \
+    "$H" "$T" "$H_CFG" "$T_CFG" "$T_CFG" "$T_CFG"
+run_case config_missing 'sample=4/4 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    'HEALTHY_SAMPLED|101|0|||1000|700:2000|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|-' "$T" "$T" "$T"
+run_case config_invalid 'sample=4/4 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    'HEALTHY_SAMPLED|101|0|||1000|700:2000|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|invalid' "$T" "$T" "$T"
+MONITOR_TEST_CONTROL_MODE=1
+export MONITOR_TEST_CONTROL_MODE
+run_case config_change_discards_loopback 'sample=2/2 state=SUSPECT_DNS_TIMEOUT phase=WAITING_FOR_BASELINE pid=101 streak=0' 0 \
+    "$H" "$T_CFG"
+unset MONITOR_TEST_CONTROL_MODE
+run_case config_transition_reason 'reason=dns_config_changed' 0 "$H" 'TRANSITION|101|0||dns_config_changed' "$T"
+run_case nft_reason_preserved 'reason=nft_rules_incomplete' 0 "$H" 'UNKNOWN|101|2||nft_rules_incomplete' "$T"
+run_case config_path_reason_preserved 'reason=dns_config_path_mismatch' 0 "$H" 'UNKNOWN|101|2||dns_config_path_mismatch' "$T"
 # Advance the private monotonic clock by one second per sample.
 printf '100.00\n' > "$tmp/uptime"
 MONITOR_TEST_MAINTENANCE_MAX=2 run_case maintenance_prolonged \
