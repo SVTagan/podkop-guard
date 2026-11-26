@@ -63,12 +63,11 @@ if pidof sing-box >/dev/null 2>&1; then
     fail live_process_after_preflight
 fi
 cat > "$tmp/box.json" <<'JSON'
-{"log":{"disabled":true},"inbounds":[{"type":"socks","tag":"test-in","listen":"127.0.0.1","listen_port":17893}],"outbounds":[{"type":"direct","tag":"direct"}]}
+{"log":{"disabled":true},"inbounds":[{"type":"socks","tag":"test-in","listen":"127.0.0.1","listen_port":17893},{"type":"direct","tag":"dns-in","listen":"127.0.0.42","listen_port":53}],"outbounds":[{"type":"direct","tag":"direct"}]}
 JSON
 /usr/bin/sing-box check -c "$tmp/box.json"
-# This separate config is solely the diagnostic layout fixture. Do not
-# pass it to sing-box or assert that a real FakeIP service is healthy.
-printf '%s\n' '{"inbounds":[{"tag":"dns-in","listen":"127.0.0.42","listen_port":53}]}' > "$tmp/watch.json"
+# The worker must read the actual runtime file, not a second fixture.
+# DNS replies below remain synthetic; no real FakeIP health claim.
 service_json=$(jq -cn --arg config "$tmp/box.json" \
     '{name:"sing-box",instances:{"sing-box.main":{command:["/usr/bin/sing-box","run","-c",$config]}}}')
 start_box() {
@@ -113,6 +112,21 @@ first_birth=$(birth "$first") || fail initial_birth
 echo "VM_B5_BOX_INITIAL pid=$first starttime=$first_birth"
 
 mkdir "$tmp/bin" "$tmp/conntrack"
+# Isolate UCI settings from the guest's real config. Only these reads use
+# the private directory; all other queries retain the real UCI behavior.
+mkdir "$tmp/uci" "$tmp/uci-delta"
+printf "config settings 'settings'\n\toption config_path '%s'\n" "$tmp/box.json" > "$tmp/uci/podkop"
+printf "config sing-box 'main'\n\toption conffile '%s'\n" "$tmp/box.json" > "$tmp/uci/sing-box"
+export PG_TEST_UCI_ROOT="$tmp" PG_TEST_REAL_UCI="$(command -v uci)"
+cat > "$tmp/bin/uci" <<'SH'
+#!/bin/sh
+case "$*" in
+    '-q get podkop.settings.config_path'|'-q get sing-box.main.conffile')
+        exec "$PG_TEST_REAL_UCI" -c "$PG_TEST_UCI_ROOT/uci" -P "$PG_TEST_UCI_ROOT/uci-delta" "$@" ;;
+    *) exec "$PG_TEST_REAL_UCI" "$@" ;;
+esac
+SH
+chmod +x "$tmp/bin/uci"
 printf '1\n' > "$tmp/conntrack/nf_conntrack_count"
 printf '1000\n' > "$tmp/conntrack/nf_conntrack_max"
 printf '0\n' > "$tmp/count"
@@ -158,7 +172,6 @@ chmod +x "$tmp/bin/"*
 # Genuine runtime lookup through ubus/jsonfilter, synthetic DNS and nft.
 # No production hook or change to the actual guest routing table.
 PATH="$tmp/bin:$PATH" PG_LIFECYCLE_DIR="$tmp" \
-    PODKOP_GUARD_WATCH_CONFIG="$tmp/watch.json" \
     PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/conntrack" \
     PODKOP_GUARD_WATCH_GRACE=0 PODKOP_GUARD_WATCH_MAX_SAMPLE=20 \
     sh "$worker" watchdog-monitor 9 0 > "$tmp/monitor.log" 2>&1 &
@@ -227,7 +240,6 @@ mv "$tmp/monitor.log" "$tmp/pid-monitor.log"
 printf '0\n' > "$tmp/count"
 rm -f "$tmp/restart-ready" "$tmp/restart-done"
 PATH="$tmp/bin:$PATH" PG_LIFECYCLE_DIR="$tmp" \
-    PODKOP_GUARD_WATCH_CONFIG="$tmp/watch.json" \
     PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/conntrack" \
     PODKOP_GUARD_WATCH_GRACE=0 PODKOP_GUARD_WATCH_MAX_SAMPLE=20 \
     sh "$worker" watchdog-monitor 9 0 > "$tmp/monitor.log" 2>&1 &

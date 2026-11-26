@@ -294,6 +294,10 @@ for marker in rules_empty rules_wrong_mark rules_missing_udp rules_wrong_range r
     grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
 done
 echo PASS_VM_B6_NFT_RULES_FIXTURES
+for marker in path_missing_uci path_missing_conffile path_relative path_uci_mismatch path_argv_mismatch path_no_config path_extra_config path_relative_workdir path_config_prefix path_file_missing path_directory path_changed_after_dns path_file_lost_after_dns path_layout_changed_after_dns path_no_workdir path_space; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+echo PASS_VM_B6_DNS_CONFIG_PATH_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

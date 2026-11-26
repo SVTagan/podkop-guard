@@ -1193,6 +1193,49 @@ watch_conntrack_status() {
     return 0
 }
 
+# Podkop owns the generated file; OpenWrt procd identifies the running
+# command. Require both UCI paths and the exact verified argv to agree.
+# The package init uses run -c FILE [-D WORKDIR]. Other layouts are unknown.
+watch_config_path() {
+    local pod_path box_path expected tail
+    WATCH_CONFIG_PATH=
+    WATCH_CONFIG_REASON=dns_config_path_unavailable
+    pod_path=$(uci -q get podkop.settings.config_path 2>/dev/null) || return 1
+    box_path=$(uci -q get sing-box.main.conffile 2>/dev/null) || return 1
+    case "$pod_path" in /*) ;; *) return 1 ;; esac
+    WATCH_CONFIG_REASON=dns_config_path_mismatch
+    [ "$pod_path" = "$box_path" ] || return 1
+    expected=$(printf '%s\000' /usr/bin/sing-box run -c "$pod_path" |
+        LC_ALL=C hexdump -v -e '1/1 "%02x"') || return 1
+    [ -n "$expected" ] || return 1
+    case "$1" in
+        "$expected") ;;
+        "$expected"2d44002f*00)
+            # -D must be one absolute argument, not more flags or files.
+            tail=${1#"$expected"2d4400}
+            tail=${tail%00}
+            case "$tail" in *00*) return 1 ;; esac ;;
+        *) return 1 ;;
+    esac
+    WATCH_CONFIG_REASON=dns_config_file_unavailable
+    [ -f "$pod_path" ] && [ -r "$pod_path" ] || return 1
+    WATCH_CONFIG_PATH=$pod_path
+    return 0
+}
+
+watch_config_check() {
+    if watch_config_path "$1"; then
+        WATCH_CONFIG_REASON=unsupported_dns_config
+        # The layout contract will be strengthened separately; never log JSON.
+        if jq -es 'length == 1 and (.[0].inbounds |
+            any(.[]?; .tag == "dns-in" and .listen == "127.0.0.42" and .listen_port == 53))'             "$WATCH_CONFIG_PATH" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+    printf 'WATCHDOG state=UNKNOWN reason=%s pid=%s dns=%s nft=%s\n' "$WATCH_CONFIG_REASON" "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
+    return 1
+}
+
 watchdog_check() {
     local tool shutdown check_pid rc check_birth check_bus current_birth control_identity initial_procd_state check_argv command_id
     WATCH_PID="none"
@@ -1271,19 +1314,6 @@ watchdog_check() {
     watch_nft_structure
     watch_nft_require_present || return 2
 
-    # This initial probe deliberately supports only the observed Podkop FakeIP
-    # inbound. Other DNS layouts must not be declared broken.
-    if [ -n "$PODKOP_GUARD_WATCH_CONFIG" ]; then
-        check_pid="$PODKOP_GUARD_WATCH_CONFIG"
-    else
-        check_pid="/etc/sing-box/config.json"
-    fi
-    if [ ! -r "$check_pid" ] ||
-       ! jq -e '.inbounds[]? | select(.tag == "dns-in" and .listen == "127.0.0.42" and .listen_port == 53)' "$check_pid" >/dev/null 2>&1; then
-        printf 'WATCHDOG state=UNKNOWN reason=unsupported_dns_config pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
-        return 2
-    fi
-
     check_pid="$WATCH_PID"
     check_birth=$(watch_process_birth "${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}" "$check_pid") || {
         printf 'WATCHDOG state=UNKNOWN reason=runtime_identity_unavailable pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
@@ -1298,6 +1328,7 @@ watchdog_check() {
         printf 'WATCHDOG state=UNKNOWN reason=runtime_identity_unavailable pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
         return 2
     }
+    watch_config_check "$check_argv" || return 2
     control_identity="$check_pid:$check_birth:$check_bus:$command_id"
     watch_probe_dns
     # Collect loopback evidence before the final identity checks so a
@@ -1345,6 +1376,7 @@ watchdog_check() {
     # This is two observations, not an atomic ruleset generation check.
     watch_nft_structure
     watch_nft_require_present || return 2
+    watch_config_check "$check_argv" || return 2
     if [ "$WATCH_DNS" = "fakeip" ] && [ "$WATCH_NFT" = "present" ]; then
         printf 'WATCHDOG state=HEALTHY_SAMPLED pid=%s dns=fakeip nft=present loopback=%s birth=%s bus=%s command_id=%s\n' "$WATCH_PID" "$WATCH_LOOPBACK" "$check_birth" "$check_bus" "$command_id"
         return 0

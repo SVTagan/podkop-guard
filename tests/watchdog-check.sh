@@ -11,7 +11,7 @@ mkdir -p "$tmp/proc" "$tmp/netfilter"
 WATCH_TEST_NFT_FIXTURE="$(cd "$(dirname "$0")" && pwd)/nft-structure-fixture.json"
 [ -r "$WATCH_TEST_NFT_FIXTURE" ]
 export WATCH_TEST_NFT_FIXTURE
-fixture_command_id=$(printf '%s' '2f7573722f62696e2f73696e672d626f780072756e00' | sha256sum)
+fixture_command_id=$(printf '%s\000' /usr/bin/sing-box run -c "$tmp/config.json" -D "$tmp" | LC_ALL=C hexdump -v -e '1/1 "%02x"' | sha256sum)
 fixture_command_id=${fixture_command_id%% *}
 : > "$tmp/list.pid"
 make_birth() {
@@ -54,9 +54,9 @@ elif [ "$WATCH_TEST_PROCD" = stopped_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED
     running=false
 fi
 if [ "$running" = false ]; then
-    printf '{"sing-box":{"instances":{"sing-box.main":{"running":false,"command":["/usr/bin/sing-box","run"],"exit_code":0}}}}\n'
+    printf '{"sing-box":{"instances":{"sing-box.main":{"running":false,"command":%s,"exit_code":0}}}}\n' "$WATCH_TEST_ARGV_JSON"
 else
-    printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":%s,"command":["/usr/bin/sing-box","run"]}}}}\n' "$pid"
+    printf '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":%s,"command":%s}}}}\n' "$pid" "$WATCH_TEST_ARGV_JSON"
 fi
 SH
 cat > "$tmp/bin/nft" <<'SH'
@@ -120,8 +120,20 @@ esac
 SH
 cat > "$tmp/bin/uci" <<'SH'
 #!/bin/sh
-[ "$1 $2 $3" = '-q get podkop.settings.shutdown_correctly' ] || exit 9
-printf '%s\n' "$WATCH_TEST_SHUTDOWN"
+case "$*" in
+    '-q get podkop.settings.shutdown_correctly') printf '%s\n' "$WATCH_TEST_SHUTDOWN" ;;
+    '-q get podkop.settings.config_path')
+        [ "$WATCH_TEST_CONFIG_CASE" != path_missing_uci ] || exit 1
+        printf '%s\n' "$WATCH_TEST_POD_CONFIG" ;;
+    '-q get sing-box.main.conffile')
+        [ "$WATCH_TEST_CONFIG_CASE" != path_missing_conffile ] || exit 1
+        if [ "$WATCH_TEST_CONFIG_CASE" = path_changed_after_dns ] && [ -e "$WATCH_TEST_DNS_CALLED" ]; then
+            printf '%s\n' /other.json
+        else
+            printf '%s\n' "$WATCH_TEST_BOX_CONFIG"
+        fi ;;
+    *) exit 9 ;;
+esac
 SH
 cat > "$tmp/bin/nslookup" <<'SH'
 #!/bin/sh
@@ -137,6 +149,10 @@ case "${WATCH_TEST_ID_CHANGE:-}" in
         ln -s /bin/busybox "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/exe" ;;
     bus) printf '700:2001\n' > "$PODKOP_GUARD_PROCD_BUS_FILE" ;;
     bus_lost) printf 'DOWN\n' > "$PODKOP_GUARD_PROCD_BUS_FILE" ;;
+esac
+case "$WATCH_TEST_CONFIG_CASE" in
+    path_file_lost_after_dns) rm -f "$WATCH_TEST_POD_CONFIG" ;;
+    path_layout_changed_after_dns) printf '{}\n' > "$WATCH_TEST_POD_CONFIG" ;;
 esac
 case "${WATCH_TEST_DNS_MAINTENANCE:-}" in
     reload) mkdir -p "$PODKOP_GUARD_WATCH_PROC_ROOT/321"
@@ -179,12 +195,32 @@ case_run() {
     else
         printf '{}\n' > "$tmp/config.json"
     fi
+    cfg_path="$tmp/config.json"
+    pod_path=$cfg_path
+    box_path=$cfg_path
+    case "$name" in
+        path_space) cfg_path="$tmp/config space.json"; cp "$pod_path" "$cfg_path"; pod_path=$cfg_path; box_path=$cfg_path ;;
+        path_uci_mismatch) box_path="$tmp/other.json" ;;
+        path_argv_mismatch) cfg_path="$tmp/other.json" ;;
+        path_relative) pod_path=config.json; box_path=$pod_path; cfg_path=$pod_path ;;
+        path_file_missing) rm -f "$cfg_path" ;;
+        path_directory) cfg_path="$tmp"; pod_path=$cfg_path; box_path=$cfg_path ;;
+    esac
+    set -- /usr/bin/sing-box run -c "$cfg_path" -D "$tmp"
+    case "$name" in
+        path_no_workdir|path_space) set -- /usr/bin/sing-box run -c "$cfg_path" ;;
+        path_no_config) set -- /usr/bin/sing-box run ;;
+        path_extra_config) set -- "$@" -c "$cfg_path" ;;
+        path_relative_workdir) set -- /usr/bin/sing-box run -c "$cfg_path" -D relative ;;
+        path_config_prefix) set -- /usr/bin/sing-box run -c "$cfg_path.extra" ;;
+    esac
+    argv_json=$(jq -cn --args '$ARGS.positional' -- "$@")
     make_birth 12345 1000 S
     make_birth 54321 1001 S
     for fixture_pid in 12345 54321; do
         rm -f "$tmp/proc/$fixture_pid/exe" "$tmp/proc/$fixture_pid/cmdline"
         ln -s /usr/bin/sing-box "$tmp/proc/$fixture_pid/exe"
-        printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/$fixture_pid/cmdline"
+        printf '%s\000' "$@" > "$tmp/proc/$fixture_pid/cmdline"
     done
     printf '700:2000\n' > "$tmp/bus"
     case "$name" in
@@ -202,6 +238,8 @@ case_run() {
     esac
     set +e
     output=$(env PATH="$tmp/bin:$PATH" \
+        WATCH_TEST_ARGV_JSON="$argv_json" WATCH_TEST_POD_CONFIG="$pod_path" \
+        WATCH_TEST_BOX_CONFIG="$box_path" WATCH_TEST_CONFIG_CASE="$name" \
         PODKOP_GUARD_WATCH_CONFIG="$tmp/config.json" \
         PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc" PODKOP_GUARD_PROCD_BUS_FILE="$tmp/bus" \
         PODKOP_GUARD_WATCH_LIST_PID_FILE="$tmp/list.pid" \
@@ -282,6 +320,24 @@ case_run() {
         rules_*)
             case "$output" in *'reason=nft_rules_incomplete '*'dns=skipped nft=partial') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        path_missing_uci|path_missing_conffile|path_relative)
+            case "$output" in *'reason=dns_config_path_unavailable '*'dns=skipped ') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        path_uci_mismatch|path_argv_mismatch|path_no_config|path_extra_config|path_relative_workdir|path_config_prefix)
+            case "$output" in *'reason=dns_config_path_mismatch '*'dns=skipped ') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        path_file_missing|path_directory)
+            case "$output" in *'reason=dns_config_file_unavailable '*'dns=skipped ') ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        path_changed_after_dns)
+            case "$output" in *'reason=dns_config_path_mismatch '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        path_file_lost_after_dns)
+            case "$output" in *'reason=dns_config_file_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
+        path_layout_changed_after_dns)
+            case "$output" in *'reason=unsupported_dns_config '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
         conntrack_unavailable|conntrack_invalid)
             case "$output" in *'reason=conntrack_unverified '*) ;; *)
                 echo "FAIL $name: missing unverified reason $output" >&2; exit 1 ;;
@@ -375,6 +431,16 @@ case_run rules_after_timeout UNKNOWN 2 timeout rules_after_dns 12345 true 0 vali
 case_run rules_numeric HEALTHY_SAMPLED 0 healthy rules_numeric 12345 true 0 valid up
 case_run procd_error      UNKNOWN                 2 healthy   present 12345 true  0 valid down
 case_run unsupported_cfg  UNKNOWN                 2 healthy   present 12345 true  0 bad   up
+# UCI path and actual argv are independent observations. The obsolete test
+# override above must not allow a different file to validate the runtime.
+for scenario in path_missing_uci path_missing_conffile path_relative path_uci_mismatch path_argv_mismatch path_no_config path_extra_config path_relative_workdir path_config_prefix path_file_missing path_directory; do
+    case_run "$scenario" UNKNOWN 2 timeout present 12345 true 0 valid up
+done
+case_run path_changed_after_dns UNKNOWN 2 timeout present 12345 true 0 valid up
+case_run path_file_lost_after_dns UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run path_layout_changed_after_dns UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run path_no_workdir HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+case_run path_space HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 
 
 # A stale PID file is not proof of a running updater.

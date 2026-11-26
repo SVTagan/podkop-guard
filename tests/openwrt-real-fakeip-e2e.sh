@@ -193,6 +193,24 @@ done
 [ "$attempt" -lt 10 ] || fail startup
 echo "VM_B6_FAKEIP_BOX pid=$box starttime=$box_birth"
 
+mkdir "$tmp/bin" "$tmp/conntrack"
+# Isolate UCI settings from the guest's real config. Only these reads use
+# the private directory; all other queries retain the real UCI behavior.
+mkdir "$tmp/uci" "$tmp/uci-delta"
+printf "config settings 'settings'\n\toption config_path '%s'\n" "$tmp/box.json" > "$tmp/uci/podkop"
+printf "config sing-box 'main'\n\toption conffile '%s'\n" "$tmp/box.json" > "$tmp/uci/sing-box"
+export PG_TEST_UCI_ROOT="$tmp" PG_TEST_REAL_UCI="$(command -v uci)"
+cat > "$tmp/bin/uci" <<'SH'
+#!/bin/sh
+case "$*" in
+    '-q get podkop.settings.config_path'|'-q get sing-box.main.conffile')
+        exec "$PG_TEST_REAL_UCI" -c "$PG_TEST_UCI_ROOT/uci" -P "$PG_TEST_UCI_ROOT/uci-delta" "$@" ;;
+    *) exec "$PG_TEST_REAL_UCI" "$@" ;;
+esac
+SH
+chmod +x "$tmp/bin/uci"
+export PATH="$tmp/bin:$PATH"
+
 # Actual nft JSON/terse contract on this guest's kernel and binary.
 # Exact mandatory signatures from Podkop 0.7.24, no policy routing.
 # Interfaces are empty; no client or FakeIP traffic is generated.
@@ -229,20 +247,20 @@ nft -j -t list table inet PodkopTable > "$tmp/nft-terse.json"
 jq -e '.nftables | type == "array" and (all(.[] | .set? | select(type == "object"); ((.elem // []) | length) == 0))' "$tmp/nft-terse.json" >/dev/null ||
     fail nft_terse_elements
 # Compare real output before and after removing one mandatory object.
-PODKOP_GUARD_WATCH_CONFIG="$tmp/box.json" "$worker" watchdog-check > "$tmp/nft-real-ok.log" ||
+"$worker" watchdog-check > "$tmp/nft-real-ok.log" ||
     { cat "$tmp/nft-real-ok.log"; cat "$tmp/nft-terse.json"; fail nft_real_positive; }
 grep -Fq 'state=HEALTHY_SAMPLED ' "$tmp/nft-real-ok.log" || fail nft_real_positive_state
 # All mandatory chains/sets still exist, but TPROXY has disappeared.
 nft flush chain inet PodkopTable proxy
 nft_rc=0
-PODKOP_GUARD_WATCH_CONFIG="$tmp/box.json" "$worker" watchdog-check > "$tmp/nft-real-rules.log" || nft_rc=$?
+"$worker" watchdog-check > "$tmp/nft-real-rules.log" || nft_rc=$?
 [ "$nft_rc" -eq 2 ] &&
     grep -Fq 'state=UNKNOWN reason=nft_rules_incomplete ' "$tmp/nft-real-rules.log" ||
     { cat "$tmp/nft-real-rules.log"; fail nft_real_rules; }
 echo PASS_VM_B6_REAL_NFT_RULES
 nft delete chain inet PodkopTable proxy
 nft_rc=0
-PODKOP_GUARD_WATCH_CONFIG="$tmp/box.json" "$worker" watchdog-check > "$tmp/nft-real-partial.log" || nft_rc=$?
+"$worker" watchdog-check > "$tmp/nft-real-partial.log" || nft_rc=$?
 [ "$nft_rc" -eq 2 ] &&
     grep -Fq 'state=UNKNOWN reason=nft_structure_partial ' "$tmp/nft-real-partial.log" ||
     { cat "$tmp/nft-real-partial.log"; fail nft_real_partial; }
@@ -254,7 +272,6 @@ echo PASS_VM_B6_REAL_NFT_CHAINS_SETS
 
 # Only nft structure and conntrack pressure are fixtures. nslookup,
 # ping, ubus, procd, /proc and the DNS config are real.
-mkdir "$tmp/bin" "$tmp/conntrack"
 cat > "$tmp/bin/nft" <<'SH'
 #!/bin/sh
 case "$*" in
@@ -267,7 +284,6 @@ chmod +x "$tmp/bin/nft"
 printf '1\n' > "$tmp/conntrack/nf_conntrack_count"
 printf '1000\n' > "$tmp/conntrack/nf_conntrack_max"
 export PATH="$tmp/bin:$PATH"
-export PODKOP_GUARD_WATCH_CONFIG="$tmp/box.json"
 export PODKOP_GUARD_WATCH_CONNTRACK_ROOT="$tmp/conntrack"
 export PODKOP_GUARD_WATCH_GRACE=0 PODKOP_GUARD_WATCH_THRESHOLD=3
 export PODKOP_GUARD_WATCH_MAX_SAMPLE=8 PODKOP_GUARD_WATCH_CHANGES_ONLY=0
