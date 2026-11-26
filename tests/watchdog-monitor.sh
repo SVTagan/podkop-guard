@@ -10,7 +10,7 @@ printf '100.00 200.00\n' > "$tmp/uptime"
 
 cat > "$tmp/mock-check" <<'SH'
 #!/bin/sh
-[ "$1" = watchdog-check ] || exit 9
+[ "$1" = watchdog-check-internal ] || exit 9
 counter=$(cat "$MONITOR_TEST_COUNTER")
 case "$counter" in ''|*[!0-9]*) exit 9 ;; esac
 counter=$((counter + 1))

@@ -1585,6 +1585,56 @@ watch_bounded_cleanup() {
     WATCH_BOUND_DIR=
 }
 
+# Private entry: only an armed, lease-owning probe session may sample.
+# This is a containment contract, not a security boundary against root.
+watch_internal_context() {
+    local root dir lease line leader birth extra owner owner_birth identity
+    local tag sequence kind advisory mode rest locked
+    root=/tmp/podkop-guard-probe.lock
+    dir="$root/active"
+    lease="$root/lease"
+    [ -d "$root" ] && [ ! -L "$root" ] && [ -d "$dir" ] && [ ! -L "$dir" ] &&
+        [ -f "$lease" ] && [ ! -L "$lease" ] &&
+        [ -f "$dir/armed" ] && [ ! -L "$dir/armed" ] &&
+        [ ! -e "$dir/cancel" ] && [ ! -L "$dir/cancel" ] &&
+        [ -f "$dir/pid" ] && [ ! -L "$dir/pid" ] &&
+        [ -f "$dir/owner" ] && [ ! -L "$dir/owner" ] || return 1
+    read -r leader birth extra < "$dir/pid" && [ -z "$extra" ] &&
+        watch_monitor_number "$leader" && watch_monitor_number "$birth" &&
+        [ "$leader" -gt 1 ] || return 1
+    read -r owner owner_birth extra < "$dir/owner" && [ -z "$extra" ] &&
+        watch_monitor_number "$owner" && watch_monitor_number "$owner_birth" &&
+        [ "$owner" -gt 1 ] && [ "$owner" != "$leader" ] || return 1
+    IFS= read -r line < /proc/self/stat || return 1
+    set -- ${line##*) }
+    [ "$#" -ge 20 ] && [ "$3" = "$leader" ] && [ "$4" = "$leader" ] || return 1
+    identity=$(watch_bounded_identity "$leader") || return 1
+    [ "$identity" = "$leader $leader $birth" ] &&
+        [ "$(watch_process_birth /proc "$leader")" = "$birth" ] &&
+        [ "$(watch_process_birth /proc "$owner")" = "$owner_birth" ] || return 1
+    [ "$(readlink /proc/self/fd/7 2>/dev/null)" = "$lease" ] &&
+        [ "$(readlink "/proc/$leader/fd/7" 2>/dev/null)" = "$lease" ] &&
+        [ "$(readlink "/proc/$owner/fd/7" 2>/dev/null)" = "$lease" ] || return 1
+    # fdinfo reports the FLOCK on the inherited open file description.
+    # Never acquire or release a lock here: the controller owns the lease.
+    locked=0
+    while read -r tag sequence kind advisory mode rest; do
+        if [ "$tag" = 'lock:' ] && [ "$kind" = FLOCK ] &&
+           [ "$advisory" = ADVISORY ] && [ "$mode" = WRITE ]; then
+            locked=1
+        fi
+    done < /proc/self/fdinfo/7 2>/dev/null || return 1
+    [ "$locked" = 1 ]
+}
+
+watchdog_check_internal() {
+    if [ "$#" -ne 0 ] || ! watch_internal_context; then
+        printf 'WATCHDOG state=UNKNOWN reason=probe_context_unverified\n'
+        return 2
+    fi
+    watchdog_check
+}
+
 watchdog_check_bounded() (
     local limit script rc wake until identity owner_stat owner_pid lock_root lock_file
     [ "$#" -le 1 ] || { err "usage: watchdog-check-bounded [seconds 3..120]"; exit 2; }
@@ -1774,11 +1824,11 @@ PG_TIMED_READ
         printf "%s\n" "$guard_pid" > "$dir/guard" || finish_group expired
         (
             if [ "$mode" = fifo ]; then
-                sh "$script" watchdog-check > "$dir/result" 2>&1 8>&- 9>&-
+                sh "$script" watchdog-check-internal > "$dir/result" 2>&1 8>&- 9>&-
                 printf "%s\n" "$?" > "$dir/rc.tmp" && mv "$dir/rc.tmp" "$dir/rc"
                 printf "done\n" >&9
             else
-                sh "$script" watchdog-check > "$dir/result" 2>&1
+                sh "$script" watchdog-check-internal > "$dir/result" 2>&1
                 printf "%s\n" "$?" > "$dir/rc.tmp" && mv "$dir/rc.tmp" "$dir/rc"
             fi
         ) &
@@ -2003,7 +2053,7 @@ watchdog_monitor() {
                 rest=${sample_output#* reason=}
                 sample_reason=${rest%% *}
                 case "$sample_reason" in
-                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|procd_registration_changed|unsupported_dns_config|dns_config_path_unavailable|dns_config_path_mismatch|dns_config_file_unavailable|dns_config_identity_unavailable|dns_config_changed|nft_table_absent|nft_table_unavailable|nft_structure_partial|nft_structure_unsupported|nft_rules_incomplete|procd_returned|procd_pid_changed|runtime_identity_unavailable|runtime_identity_changed|ubusd_identity_unavailable|ubusd_changed|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
+                    conntrack_pressure|conntrack_unverified|loopback_unresponsive|procd_unavailable|procd_invalid_reply|procd_stopped|procd_unregistered|procd_registration_changed|unsupported_dns_config|dns_config_path_unavailable|dns_config_path_mismatch|dns_config_file_unavailable|dns_config_identity_unavailable|dns_config_changed|nft_table_absent|nft_table_unavailable|nft_structure_partial|nft_structure_unsupported|nft_rules_incomplete|procd_returned|procd_pid_changed|runtime_identity_unavailable|runtime_identity_changed|ubusd_identity_unavailable|ubusd_changed|list_update|podkop_lifecycle|probe_hard_deadline|probe_late|probe_invalid_exit|probe_empty_output|probe_oversize_output|probe_pid_invalid|probe_isolation_unavailable|probe_isolation_unverified|probe_start_unverified|probe_context_unverified|probe_tmp_unavailable|probe_uncontained|probe_blocked|probe_barrier_unavailable) ;;
                     *) sample_reason="" ;;
                 esac ;;
         esac
@@ -2736,7 +2786,7 @@ Commands:
   refresh         Build, validate and atomically commit a new persistent LKG
   cache-restore   Manually restore cache while sing-box is stopped
   boot-restore    Safe boot-time cache restore (skips when not applicable)
-  watchdog-check  One-shot observe-only sing-box/Podkop runtime sample
+  watchdog-check  One-shot isolated observe-only local probe (default 8s)
   watchdog-check-bounded [seconds]  Isolated local probe with deadline (B4)
   watchdog-monitor [cycles] [interval]  Bounded RAM-only observer (default 6 x 20s)
   watchdog-observe  Continuous observe-only monitor (opt-in procd instance)
@@ -2763,7 +2813,8 @@ case "${1:-}" in
     refresh) refresh_snapshot 1 ;;
     cache-restore) cache_restore ;;
     boot-restore) boot_restore ;;
-    watchdog-check) watchdog_check ;;
+    watchdog-check) shift; [ "$#" -eq 0 ] || exit 2; watchdog_check_bounded ;;
+    watchdog-check-internal) shift; watchdog_check_internal "$@" ;;
     watchdog-check-bounded) shift; watchdog_check_bounded "$@" ;;
     watchdog-monitor) shift; watchdog_monitor "$@" ;;
     watchdog-observe) watchdog_observe ;;

@@ -96,6 +96,10 @@ run_runtime_phase() {
     for marker in flock_missing_no_start flock_error_no_start armed_absent_blocked armed_malformed_blocked live_session_without_lease_blocked no_lease_session_reclaimed concurrent_start_single_winner; do
         grep -Fxq "PASS $marker" /tmp/pg-b4-deadline
     done
+    for marker in private_direct private_fake_env private_lease_only public_deadline public_resident_exclusion; do
+        grep -Fxq "PASS $marker" /tmp/pg-b4-deadline
+    done
+    echo PASS_VM_B6_PUBLIC_PROBE_CONTAINMENT
     echo PASS_VM_B5_CONTAINMENT_EDGE_CASES
     echo PASS_VM_B4_ISOLATED_DEADLINE
     grep -Fq 'deadline_breaks_streak' /tmp/pg-b3-monitor-tests
@@ -394,6 +398,10 @@ for marker in config_changed config_rearmed config_missing config_invalid config
     grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
 done
 echo PASS_VM_B6_DNS_LAYOUT_FIXTURES
+for marker in public_healthy public_timeout public_unknown; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+echo PASS_VM_B6_PUBLIC_PROBE_STATES
 # Preserve the completed fixtures and the exact installed worker/LKG across
 # serial phases. A later phase must not recreate or repair their state.
 verify_split_boundary before-lifecycle

@@ -6,6 +6,12 @@ script=$1
 case "$script" in /*) ;; *) script="$(pwd)/$script" ;; esac
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+# Test-only direct function harness. The shipped worker has no raw public path.
+awk '
+    /^    watchdog-check\)/ { print "    watchdog-check) watchdog_check ;;"; n++; next }
+    { print }
+    END { if (n != 1) exit 1 }
+' "$script" > "$tmp/raw-worker"
 mkdir -p "$tmp/bin"
 mkdir -p "$tmp/proc" "$tmp/netfilter"
 WATCH_TEST_NFT_FIXTURE="$(cd "$(dirname "$0")" && pwd)/nft-structure-fixture.json"
@@ -267,6 +273,8 @@ case_run() {
         malformed_birth) printf '12345 (sing box) S 0\n' > "$tmp/proc/12345/stat" ;;
         missing_bus_identity) printf 'DOWN\n' > "$tmp/bus" ;;
     esac
+    probe_script="$tmp/raw-worker"
+    case "$name" in public_*) probe_script=$script ;; esac
     set +e
     output=$(env PATH="$tmp/bin:$PATH" \
         WATCH_TEST_ARGV_JSON="$argv_json" WATCH_TEST_POD_CONFIG="$pod_path" \
@@ -279,7 +287,8 @@ case_run() {
         WATCH_TEST_RUNNING="$running" WATCH_TEST_SHUTDOWN="$shutdown" \
         WATCH_TEST_CONFIG="$config" WATCH_TEST_PROCD="$procd" \
         WATCH_TEST_PID_COUNTER="$tmp/pid-counter" WATCH_TEST_DNS_CALLED="$tmp/dns-called" \
-        sh "$script" watchdog-check 2>&1)
+        PODKOP_GUARD_WATCH_CHECK_SCRIPT= \
+        sh "$probe_script" watchdog-check 2>&1)
     rc=$?
     set -e
     case "$output" in
@@ -422,7 +431,7 @@ case_run() {
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
     esac
     case "$name" in
-        healthy) case "$output" in *" birth=1000 bus=700:2000 command_id=$fixture_command_id config_id=$fixture_config_id") ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
+        healthy|public_healthy) case "$output" in *" birth=1000 bus=700:2000 command_id=$fixture_command_id config_id=$fixture_config_id") ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
         same_pid_birth_changed*) case "$output" in *'reason=runtime_identity_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         bus_identity_changed*) case "$output" in *'reason=ubusd_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         wrong_exe|deleted_exe|missing_exe|wrong_argv|missing_argv|truncated_argv|extra_argv)
@@ -651,4 +660,7 @@ race_output=$(PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/race-proc" \
 }
 tests=$((tests + 1))
 echo PASS maintenance_proc_disappeared
+case_run public_healthy HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+case_run public_timeout SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
+case_run public_unknown UNKNOWN 2 invalid present 12345 true 0 valid up
 printf 'PASS: %s observer-only scenarios\n' "$tests"

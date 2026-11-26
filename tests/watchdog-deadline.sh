@@ -7,6 +7,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 cat > "$tmp/check" <<'SH'
 #!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = watchdog-check-internal ] || exit 9
 case "$DEADLINE_FIXTURE" in
     healthy) echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' ;;
     suspect) echo 'WATCHDOG state=SUSPECT_DNS_TIMEOUT pid=123 dns=timeout nft=present'; exit 1 ;;
@@ -121,7 +122,7 @@ case "$DEADLINE_FIXTURE" in
         wait ;;
     invalid) exit 19 ;;
     empty) : ;;
-    gate)
+    gate|gate_monitor)
         IFS= read -r stat < /proc/self/stat || exit 19
         self=${stat%% *}
         : > "$B5_GATE_DIR/launched.$self"
@@ -130,7 +131,11 @@ case "$DEADLINE_FIXTURE" in
             [ "$tries" -lt 10 ] || exit 19
             tries=$((tries + 1)); sleep 1
         done
-        echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present' ;;
+        if [ "$DEADLINE_FIXTURE" = gate_monitor ]; then
+            echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present loopback=ok birth=1000 bus=700:2000 command_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa config_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+        else
+            echo 'WATCHDOG state=HEALTHY_SAMPLED pid=123 dns=fakeip nft=present'
+        fi ;;
     fd_isolation)
         IFS= read -r stat < /proc/self/stat || exit 19
         self=${stat%% *}
@@ -589,7 +594,7 @@ for fixture in supervisors_stopped supervisors_lost; do
     lease_inode=$(test_lease_inode)
     set +e
     blocked=$(PATH="$tmp/actual-bin:$PATH" B5_PHASE=active B5_CASE_DIR="$tmp/blocked-dir" \
-        DEADLINE_FIXTURE=healthy sh "$worker" watchdog-check-bounded 3)
+        DEADLINE_FIXTURE=healthy sh "$worker" watchdog-check)
     rc=$?
     set -e
     [ "$rc" -eq 2 ] && [ "$blocked" = 'WATCHDOG state=UNKNOWN reason=probe_blocked' ] || {
@@ -796,7 +801,10 @@ for n in 1 2 3 4; do
     (
         while [ ! -e "$B5_GATE_DIR/start" ]; do sleep 0.1 2>/dev/null || sleep 1; done
         set +e
-        DEADLINE_FIXTURE=gate sh "$worker" watchdog-check-bounded 15 > "$B5_GATE_DIR/out.$n" 2>&1
+        case "$n" in
+            1|3) DEADLINE_FIXTURE=gate PODKOP_GUARD_WATCH_MAX_SAMPLE=15 sh "$worker" watchdog-check > "$B5_GATE_DIR/out.$n" 2>&1 ;;
+            *) DEADLINE_FIXTURE=gate sh "$worker" watchdog-check-bounded 15 > "$B5_GATE_DIR/out.$n" 2>&1 ;;
+        esac
         rc=$?
         printf '%s\n' "$rc" > "$B5_GATE_DIR/rc.$n"
     ) &
@@ -842,4 +850,68 @@ set -- "$B5_GATE_DIR"/launched.*
     echo 'FAIL concurrent startup final assertions' >&2; exit 1;
 }
 passed=$((passed + 1)); echo 'PASS concurrent_start_single_winner'
+# The private worker must not be callable from an ordinary shell.
+# Neither a guessed environment flag nor an opened lease is sufficient.
+for mode in direct fake_env lease_only; do
+    rc=0
+    case "$mode" in
+        direct) out=$(sh "$worker" watchdog-check-internal) || rc=$? ;;
+        fake_env) out=$(PODKOP_GUARD_INTERNAL=1 sh "$worker" watchdog-check-internal) || rc=$? ;;
+        lease_only) out=$(
+            exec 7>>/tmp/podkop-guard-probe.lock/lease
+            flock -n 7 || exit 19
+            sh "$worker" watchdog-check-internal
+        ) || rc=$? ;;
+    esac
+    [ "$rc" -eq 2 ] && [ "$out" = 'WATCHDOG state=UNKNOWN reason=probe_context_unverified' ] ||
+        { echo "FAIL private_$mode rc=$rc out=$out" >&2; exit 1; }
+    passed=$((passed + 1)); echo "PASS private_$mode"
+done
+rc=0
+out=$(DEADLINE_FIXTURE=hung PODKOP_GUARD_WATCH_MAX_SAMPLE=3 sh "$worker" watchdog-check) || rc=$?
+[ "$rc" -eq 2 ] && [ "$out" = 'WATCHDOG state=UNKNOWN reason=probe_hard_deadline' ] ||
+    { echo "FAIL public_deadline rc=$rc out=$out" >&2; exit 1; }
+read -r pid < "$tmp/childpid"
+test_child_quiescent "$pid" && test_lease_free && [ ! -e "$slot" ] && [ ! -e "$slot.abandoned" ] || exit 1
+passed=$((passed + 1)); echo PASS public_deadline
+
+# Hold a resident-style probe in its actual wrapper while manual aliases
+# and an unsolicited private entry try to start. Release only our fixture.
+rm -f "$B5_GATE_DIR"/launched.* "$B5_GATE_DIR/release"
+DEADLINE_FIXTURE=gate_monitor PODKOP_GUARD_WATCH_MAX_SAMPLE=15 \
+    PODKOP_GUARD_WATCH_GRACE=0 PODKOP_GUARD_WATCH_CHANGES_ONLY=0 \
+    sh "$worker" watchdog-monitor 1 0 > "$tmp/active-monitor.out" 2>&1 &
+monitor_pid=$!
+started=$(date +%s)
+while :; do
+    set -- "$B5_GATE_DIR"/launched.*
+    if [ "$#" -eq 1 ] && [ -f "$1" ]; then break; fi
+    if [ "$(( $(date +%s) - started ))" -ge 5 ]; then
+        : > "$B5_GATE_DIR/release"
+        wait "$monitor_pid" || :
+        echo FAIL public_resident_gate_not_ready >&2
+        exit 1
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+done
+failed=0
+for command in watchdog-check watchdog-check-bounded watchdog-check-internal; do
+    rc=0
+    out=$(DEADLINE_FIXTURE=gate sh "$worker" "$command") || rc=$?
+    expected=probe_blocked
+    [ "$command" != watchdog-check-internal ] || expected=probe_context_unverified
+    if [ "$rc" -ne 2 ] || [ "$out" != "WATCHDOG state=UNKNOWN reason=$expected" ]; then
+        echo "FAIL public_resident_exclusion command=$command rc=$rc out=$out" >&2
+        failed=1
+    fi
+done
+: > "$B5_GATE_DIR/release"
+wait "$monitor_pid" || failed=1
+[ "$failed" -eq 0 ] || exit 1
+grep -Fxq 'MONITOR sample=1/1 state=HEALTHY_SAMPLED phase=HEALTHY pid=123 streak=0' "$tmp/active-monitor.out"
+grep -Fxq 'MONITOR_END completed=1 confirmations=0 action=none' "$tmp/active-monitor.out"
+set -- "$B5_GATE_DIR"/launched.*
+[ "$#" -eq 1 ] && [ -f "$1" ] && test_lease_free &&
+    [ ! -e "$slot" ] && [ ! -e "$slot.abandoned" ] || exit 1
+passed=$((passed + 1)); echo PASS public_resident_exclusion
 printf 'PASS: %s B4 bounded cases\n' "$passed"
