@@ -270,6 +270,10 @@ for marker in unregistered empty_service malformed_service malformed_instances m
     grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
 done
 echo PASS_VM_B6_PROCD_SCHEMA_FIXTURES
+for marker in wrong_exe deleted_exe missing_exe wrong_argv missing_argv truncated_argv extra_argv argv_changed_during_dns exe_changed_during_dns; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+echo PASS_VM_B6_PROC_IDENTITY_FIXTURES
 run_watch_suite watchdog-deadline.sh /tmp/pg-b4-deadline
 grep -Fq 'B4 bounded cases' /tmp/pg-b4-deadline
 grep -Fq 'PASS fd_isolation' /tmp/pg-b4-deadline

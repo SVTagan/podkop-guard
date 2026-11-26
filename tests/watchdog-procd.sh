@@ -17,6 +17,16 @@ printf '%s\n' "$PROCD_TEST_REPLY"
 SH
 chmod +x "$tmp/bin/ubus"
 export PATH="$tmp/bin:$PATH" PROCD_TEST_FORBIDDEN="$tmp/forbidden"
+# Fake /proc only for deterministic snapshots; real VM separately checks
+# the executable and NUL-separated argv of the actual sing-box.
+mkdir -p "$tmp/proc/24430"
+ln -s /usr/bin/sing-box "$tmp/proc/24430/exe"
+printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/24430/cmdline"
+{ printf '24430 (sing box) S'; n=0
+  while [ "$n" -lt 18 ]; do printf ' 0'; n=$((n + 1)); done
+  printf ' 1000 0\n'
+} > "$tmp/proc/24430/stat"
+export PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc"
 passed=0
 event_case() {
     name=$1 expected=$2 input=$3
@@ -87,6 +97,14 @@ snapshot_case stopped_with_pid 'PROCD_SNAPSHOT state=UNKNOWN reason=incomplete_i
 # A complete run command is required independently of exit metadata.
 snapshot_case stopped_missing_operation 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":false,"command":["/usr/bin/sing-box"]}}}}' ok
 snapshot_case running_missing_operation 'PROCD_SNAPSHOT state=UNKNOWN reason=wrong_command action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box"]}}}}' ok
+# Exact argv boundaries: same flattened words are not the same argv.
+printf '/usr/bin/sing-box\000run\000-c\000/a b.json\000' > "$tmp/proc/24430/cmdline"
+snapshot_case spaced_argument 'PROCD_SNAPSHOT state=RUNNING pid=24430 action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","run","-c","/a b.json"]}}}}' ok
+snapshot_case split_argument 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_unavailable action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","run","-c","/a","b.json"]}}}}' ok
+printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/24430/cmdline"
+rm -f "$tmp/proc/24430/exe"
+ln -s '/usr/bin/sing-box (deleted)' "$tmp/proc/24430/exe"
+snapshot_case deleted_executable 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_unavailable action=none' '{"sing-box":{"instances":{"sing-box.main":{"running":true,"pid":24430,"command":["/usr/bin/sing-box","run"]}}}}' ok
 # Disallow arguments that could accidentally request service actions.
 for cmd in watchdog-procd-event watchdog-procd-snapshot; do
     set +e

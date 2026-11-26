@@ -217,6 +217,10 @@ done
 cat "$tmp/ready.log"
 [ "$attempt" -lt 5 ] && our_box || fail real_dns_readiness
 echo PASS_VM_B6_REAL_FAKEIP_BASELINE
+snapshot=$(sh "$worker" watchdog-procd-snapshot)
+[ "$snapshot" = "PROCD_SNAPSHOT state=RUNNING pid=$box action=none" ] ||
+    fail actual_runtime_snapshot
+echo PASS_VM_B6_PROC_IDENTITY_REAL
 
 # The monitor is unmodified. Give the external harness a small interval
 # to stop/resume between samples; exact assertions detect a missed window.

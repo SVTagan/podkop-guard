@@ -52,6 +52,16 @@ export PROCD_B2_COUNT="$tmp/snapshot-count"
 export PROCD_B2_SUB_LOG="$tmp/subscriptions"
 export PROCD_B2_BUS_FILE="$tmp/bus"
 export PROCD_B2_FORBIDDEN="$tmp/forbidden"
+for fixture_pid in 100 200; do
+    mkdir -p "$tmp/proc/$fixture_pid"
+    ln -s /usr/bin/sing-box "$tmp/proc/$fixture_pid/exe"
+    printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/$fixture_pid/cmdline"
+    { printf '%s (sing box) S' "$fixture_pid"; n=0
+      while [ "$n" -lt 18 ]; do printf ' 0'; n=$((n + 1)); done
+      printf ' 1000 0\n'
+    } > "$tmp/proc/$fixture_pid/stat"
+done
+export PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc"
 passed=0
 
 case_run() {
@@ -89,7 +99,7 @@ PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/proc"
 export PODKOP_GUARD_WATCH_PROC_ROOT
 case_run maintenance event 'event=RESPAWN_REPORTED diagnosis=MAINTENANCE history=INCOMPLETE action=none' 2
 rm -f "$tmp/proc/321/cmdline"
-unset PODKOP_GUARD_WATCH_PROC_ROOT
+ # Keep the synthetic runtime proc root for subsequent cases.
 
 case_run missing_event pid_change 'state_change=UNEXPLAINED snapshot=RUNNING history=INCOMPLETE' 3
 case_run dead_subscriber fail_subscription 'subscription=RESET reason=subscriber_exit' 3

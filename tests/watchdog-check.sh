@@ -78,6 +78,9 @@ case "${WATCH_TEST_ID_CHANGE:-}" in
     birth) sed 's/ 1000 0$/ 1001 0/' "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/stat" > "$WATCH_TEST_DNS_CALLED.stat"
         mv "$WATCH_TEST_DNS_CALLED.stat" "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/stat" ;;
     birth_lost) rm -f "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/stat" ;;
+    argv) printf '/usr/bin/sing-box\000run\000-c\000/other config.json\000' > "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/cmdline" ;;
+    exe) rm -f "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/exe"
+        ln -s /bin/busybox "$PODKOP_GUARD_WATCH_PROC_ROOT/12345/exe" ;;
     bus) printf '700:2001\n' > "$PODKOP_GUARD_PROCD_BUS_FILE" ;;
     bus_lost) printf 'DOWN\n' > "$PODKOP_GUARD_PROCD_BUS_FILE" ;;
 esac
@@ -124,8 +127,20 @@ case_run() {
     fi
     make_birth 12345 1000 S
     make_birth 54321 1001 S
+    for fixture_pid in 12345 54321; do
+        rm -f "$tmp/proc/$fixture_pid/exe" "$tmp/proc/$fixture_pid/cmdline"
+        ln -s /usr/bin/sing-box "$tmp/proc/$fixture_pid/exe"
+        printf '/usr/bin/sing-box\000run\000' > "$tmp/proc/$fixture_pid/cmdline"
+    done
     printf '700:2000\n' > "$tmp/bus"
     case "$name" in
+        wrong_exe) rm -f "$tmp/proc/12345/exe"; ln -s /bin/busybox "$tmp/proc/12345/exe" ;;
+        deleted_exe) rm -f "$tmp/proc/12345/exe"; ln -s '/usr/bin/sing-box (deleted)' "$tmp/proc/12345/exe" ;;
+        missing_exe) rm -f "$tmp/proc/12345/exe" ;;
+        wrong_argv) printf '/usr/bin/sing-box\000check\000' > "$tmp/proc/12345/cmdline" ;;
+        missing_argv) rm -f "$tmp/proc/12345/cmdline" ;;
+        truncated_argv) printf '/usr/bin/sing-box\000run' > "$tmp/proc/12345/cmdline" ;;
+        extra_argv) printf '/usr/bin/sing-box\000run\000\000' > "$tmp/proc/12345/cmdline" ;;
         missing_birth) rm -f "$tmp/proc/12345/stat" ;;
         zombie_birth) make_birth 12345 1000 Z ;;
         malformed_birth) printf '12345 (sing box) S 0\n' > "$tmp/proc/12345/stat" ;;
@@ -217,7 +232,10 @@ case_run() {
         healthy) case "$output" in *' birth=1000 bus=700:2000') ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
         same_pid_birth_changed*) case "$output" in *'reason=runtime_identity_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         bus_identity_changed*) case "$output" in *'reason=ubusd_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
-        missing_birth|zombie_birth|malformed_birth|birth_lost_during_dns) case "$output" in *'reason=runtime_identity_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+        wrong_exe|deleted_exe|missing_exe|wrong_argv|missing_argv|truncated_argv|extra_argv)
+            case "$output" in *'reason=runtime_identity_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        missing_birth|zombie_birth|malformed_birth|birth_lost_during_dns|argv_changed_during_dns|exe_changed_during_dns) case "$output" in *'reason=runtime_identity_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         missing_bus_identity|bus_lost_during_dns) case "$output" in *'reason=ubusd_identity_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
     esac
     tests=$((tests + 1))
@@ -346,4 +364,13 @@ case_run malformed_json UNKNOWN 2 healthy present none false 0 valid malformed_j
 case_run multi_reply UNKNOWN 2 healthy present none false 0 valid multi_reply
 case_run wrong_command UNKNOWN 2 healthy present 12345 true 0 valid wrong_command
 case_run missing_pid UNKNOWN 2 healthy present none true 0 valid missing_pid
+# Actual byte layout is independently checked, not inferred from procd.
+for scenario in wrong_exe deleted_exe missing_exe wrong_argv missing_argv truncated_argv extra_argv; do
+    case_run "$scenario" UNKNOWN 2 healthy present 12345 true 0 valid up
+done
+export WATCH_TEST_ID_CHANGE=argv
+case_run argv_changed_during_dns UNKNOWN 2 timeout present 12345 true 0 valid up
+WATCH_TEST_ID_CHANGE=exe
+case_run exe_changed_during_dns UNKNOWN 2 healthy present 12345 true 0 valid up
+unset WATCH_TEST_ID_CHANGE
 printf 'PASS: %s observer-only scenarios\n' "$tests"

@@ -865,6 +865,27 @@ watch_process_birth() (
     printf '%s\n' "${20}"
 )
 
+# Verify the actual runtime against the registered argv without logging it.
+# Supported command strings are printable ASCII, at most 8192 bytes
+# including NUL separators. Unsupported layouts fail closed.
+watch_runtime_matches() (
+    local root pid birth argv before after exe actual
+    root=$1 pid=$2 birth=$3 argv=$4
+    [ -n "$argv" ] || exit 1
+    before=$(watch_process_birth "$root" "$pid") || exit 1
+    [ "$before" = "$birth" ] || exit 1
+    exe=$(readlink "$root/$pid/exe" 2>/dev/null) || exit 1
+    [ "$exe" = /usr/bin/sing-box ] || exit 1
+    # hexdump preserves empty arguments, embedded spaces and trailing NUL.
+    # Read one byte beyond the maximum supported argv; no pipe hides
+    # read failure. The encoded result is private and bounded.
+    actual=$(LC_ALL=C hexdump -v -n 8193 -e '1/1 "%02x"' "$root/$pid/cmdline" 2>/dev/null) || exit 1
+    [ "$actual" = "$argv" ] || exit 1
+    [ "$(readlink "$root/$pid/exe" 2>/dev/null)" = "$exe" ] || exit 1
+    after=$(watch_process_birth "$root" "$pid") || exit 1
+    [ "$after" = "$birth" ]
+)
+
 watch_valid_bus_identity() {
     case "$1" in ''|*[!0-9:]*|:*|*:|*:*:*) return 1 ;; *:*) return 0 ;; *) return 1 ;; esac
 }
@@ -891,11 +912,14 @@ watch_box_pid() {
     WATCH_PID=none
     WATCH_RUNNING=unknown
     WATCH_PROCD_STATE=UNKNOWN
+    WATCH_PROCD_ARGV=
     WATCH_PROCD_REASON=procd_invalid_reply
     report=$(watch_procd_report) || return 2
     case "$report" in
-        'PROCD_SNAPSHOT state=RUNNING pid='*' action=none')
+        'PROCD_SNAPSHOT state=RUNNING pid='*' argv='*' action=none')
             rest=${report#* pid=}; WATCH_PID=${rest%% *}
+            rest=${report#* argv=}; WATCH_PROCD_ARGV=${rest%% *}
+            case "$WATCH_PROCD_ARGV" in ''|*[!0-9a-f]*) return 2 ;; esac
             WATCH_RUNNING=true
             WATCH_PROCD_STATE=RUNNING
             return 0 ;;
@@ -1029,7 +1053,7 @@ watch_conntrack_status() {
 }
 
 watchdog_check() {
-    local tool shutdown check_pid rc check_birth check_bus current_birth control_identity initial_procd_state
+    local tool shutdown check_pid rc check_birth check_bus current_birth control_identity initial_procd_state check_argv
     WATCH_PID="none"
     WATCH_RUNNING="unknown"
     WATCH_NFT="unknown"
@@ -1038,7 +1062,7 @@ watchdog_check() {
     WATCH_CONNTRACK=unverified
     WATCH_MAINTENANCE=""
 
-    for tool in ubus nft jq nslookup uci awk grep tr; do
+    for tool in ubus nft jq nslookup uci awk grep tr hexdump readlink; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             printf 'WATCHDOG state=UNKNOWN reason=missing_tool:%s\n' "$tool"
             return 2
@@ -1120,6 +1144,11 @@ watchdog_check() {
         printf 'WATCHDOG state=UNKNOWN reason=runtime_identity_unavailable pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
         return 2
     }
+    check_argv=$WATCH_PROCD_ARGV
+    if ! watch_runtime_matches "${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}" "$check_pid" "$check_birth" "$check_argv"; then
+        printf 'WATCHDOG state=UNKNOWN reason=runtime_identity_unavailable pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+        return 2
+    fi
     control_identity="$check_pid:$check_birth:$check_bus"
     watch_probe_dns
     # Collect loopback evidence before the final identity checks so a
@@ -1152,9 +1181,13 @@ watchdog_check() {
         printf 'WATCHDOG state=UNKNOWN reason=runtime_identity_unavailable pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
         return 2
     }
-    if [ "$current_birth" != "$check_birth" ]; then
+    if [ "$current_birth" != "$check_birth" ] || [ "$WATCH_PROCD_ARGV" != "$check_argv" ]; then
         printf 'WATCHDOG state=TRANSITION reason=runtime_identity_changed nft=%s\n' "$WATCH_NFT"
         return 0
+    fi
+    if ! watch_runtime_matches "${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}" "$WATCH_PID" "$current_birth" "$WATCH_PROCD_ARGV"; then
+        printf 'WATCHDOG state=UNKNOWN reason=runtime_identity_unavailable pid=%s nft=%s\n' "$WATCH_PID" "$WATCH_NFT"
+        return 2
     fi
     watch_runtime_bus_verify "$check_bus"
     rc=$?
@@ -2111,6 +2144,15 @@ watch_procd_report() {
         def unknown($r): "PROCD_SNAPSHOT state=UNKNOWN reason=\($r) action=none";
         def absent: "PROCD_SNAPSHOT state=UNREGISTERED reason=not_listed action=none";
         def integer: if type == "number" then . == floor else false end;
+        def supported_command:
+            type == "array" and .[0] == "/usr/bin/sing-box" and .[1] == "run" and
+            all(.[]; if type == "string" then (explode | all(. >= 32 and . <= 126)) else false end) and
+            ((join("\u0000") + "\u0000") | length <= 8192);
+        def argv_hex:
+            "0123456789abcdef" as $digits |
+            (join("\u0000") + "\u0000" | explode |
+            map(. as $n | $digits[($n / 16 | floor):(($n / 16 | floor) + 1)] +
+                $digits[($n % 16):(($n % 16) + 1)]) | join(""));
         if length != 1 then unknown("invalid_reply")
         else .[0] |
             if type != "object" then unknown("invalid_reply")
@@ -2127,13 +2169,13 @@ watch_procd_report() {
                        ($i.command[0] != "/usr/bin/sing-box") then unknown("wrong_command")
                     elif $i.running == true then
                         if ($i.pid | integer) and $i.pid > 1 and $i.pid <= 2147483647 then
-                            if $i.command[1] == "run" and all($i.command[]; type == "string") then
-                                "PROCD_SNAPSHOT state=RUNNING pid=\($i.pid) action=none"
+                            if ($i.command | supported_command) then
+                                "PROCD_SNAPSHOT state=RUNNING pid=\($i.pid) argv=\($i.command | argv_hex) action=none"
                             else unknown("wrong_command") end
                         else unknown("incomplete_instance") end
                     elif $i.running == false then
                         if ($i | has("pid")) then unknown("incomplete_instance")
-                        elif $i.command[1] != "run" or (all($i.command[]; type == "string") | not) then
+                        elif ($i.command | supported_command | not) then
                             unknown("wrong_command")
                         elif ($i.exit_code | integer) and $i.exit_code >= 0 then
                             "PROCD_SNAPSHOT state=STOPPED exit_code=\($i.exit_code) reason=undetermined action=none"
@@ -2149,12 +2191,28 @@ watch_procd_report() {
 }
 
 watchdog_procd_snapshot() {
+    local tool report root pid rest argv birth
     [ "$#" -eq 0 ] || { err "usage: watchdog-procd-snapshot"; return 2; }
-    if ! command -v ubus >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-        printf 'PROCD_SNAPSHOT state=UNKNOWN reason=missing_tool action=none\n'
-        return 0
-    fi
-    watch_procd_report
+    for tool in ubus jq hexdump readlink; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            printf 'PROCD_SNAPSHOT state=UNKNOWN reason=missing_tool action=none\n'
+            return 0
+        fi
+    done
+    report=$(watch_procd_report)
+    case "$report" in
+        'PROCD_SNAPSHOT state=RUNNING pid='*' argv='*' action=none')
+            rest=${report#* pid=}; pid=${rest%% *}
+            rest=${report#* argv=}; argv=${rest%% *}
+            root="${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}"
+            if birth=$(watch_process_birth "$root" "$pid") &&
+               watch_runtime_matches "$root" "$pid" "$birth" "$argv"; then
+                printf 'PROCD_SNAPSHOT state=RUNNING pid=%s action=none\n' "$pid"
+            else
+                printf 'PROCD_SNAPSHOT state=UNKNOWN reason=runtime_identity_unavailable action=none\n'
+            fi ;;
+        *) printf '%s\n' "$report" ;;
+    esac
 }
 
 # Stage B2: procd event stream + independent snapshot reconciliation.
