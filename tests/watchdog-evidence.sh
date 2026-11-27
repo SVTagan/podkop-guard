@@ -2,7 +2,7 @@
 # Independent metadata-only collector: all dependencies are mocked.
 # No network requests, VPN health checks, UCI writes, route or service changes.
 set -eu
-worker="${1:-./podkop-guard}"
+worker="${1:-$(dirname "$0")/watchdog-research.sh}"
 case "$worker" in /*) ;; *) worker="$(pwd)/${worker#./}" ;; esac
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM

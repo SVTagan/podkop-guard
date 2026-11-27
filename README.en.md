@@ -10,18 +10,13 @@ The project originated from a real failure: Podkop could not download part of it
 
 This is an independent project and is not part of or affiliated with Podkop.
 
-### Independent two-axis classification (stage A, experimental)
+### Diagnostic scope (experimental branch)
 
-`podkop-guard watchdog-classify <local> <wan> <vpn> <doh>` is a **pure function**: it performs no network probes, recovery, or service actions. Its new result contains two separate axes: `local_class` / `local_evidence` for sing-box/Podkop health, and `external_class` / `external_coverage` for supplied WAN/VPN/DoH context. Coverage is only the number of non-`UNKNOWN` inputs out of three; **it is not a confidence or trust metric**.
-
-`SUSPECT_DNS_TIMEOUT` always yields `BOX_DNS_HUNG_CANDIDATE`; `SUSPECT_PROCESS_MISSING` always yields `BOX_PROCESS_MISSING_CANDIDATE` **even when WAN is UNKNOWN or DOWN**. One local sample is a suspicion, not a confirmed fault or permission to restart. `HEALTHY_SAMPLED` means sampled *local* health only. Manual stop and maintenance take their respective local categories. A dead VPN with healthy local sing-box gives `local_class=LOCAL_HEALTHY_SAMPLED` and `external_class=VPN_UNAVAILABLE`.
-
-`watchdog-evidence` remains independent metadata-only collection and now prints the new two-axis result. It never invokes Failover, NetGuard or curl. It does not assert WAN reachability, and VPN/DoH remain UNKNOWN without separately validated evidence. All results end in `authority=observe-only action=none`. The previous experimental `CLASSIFY class=...` format has been replaced; stable `v0.2.4` remains unchanged. Recovery/fail-open require a separate, future policy gate. This code has not been installed on Redmi AX6000.
-
+Guard evaluates local sing-box/Podkop health independently of external WAN/VPN/DoH reachability. `HEALTHY_SAMPLED` is not proof of client Internet access; `SUSPECT` and `CONFIRMED` authorize no intervention in observe-only mode. The exploratory `watchdog-evidence` and `watchdog-classify` commands have moved to test-only code; `watchdog-procd-follow` has been removed. They are not part of the installed worker. The bounded `watchdog-procd-monitor` remains for compatibility research. Recovery and fail-open are not implemented.
 
 ### Stage B4.1: manually bounded local diagnostic
 
-`watchdog-check-bounded [seconds]` runs the existing `watchdog-check` using `setsid` in a separate session and verifies its own diagnostic PID/PGID/SID. A deadline of 3–120 seconds kills **only the isolated diagnostic process group** on expiry and returns `UNKNOWN reason=probe_hard_deadline`, never confirmed failure. Temporary files use RAM (`/tmp`). If process isolation cannot be verified, the check fails conservatively with `UNKNOWN` and no unsafe group signal.
+`watchdog-check` (default 8s) and `watchdog-check-bounded [seconds]` share a probe lease and isolation wrapper. The internal diagnosis runs under `setsid` in a verified diagnostic session; there is no unbounded public entry. A deadline of 3–120 seconds kills **only the isolated diagnostic process group** on expiry and returns `UNKNOWN reason=probe_hard_deadline`, never confirmed failure. Temporary files use RAM (`/tmp`). If process isolation cannot be verified, the check fails conservatively with `UNKNOWN` and no unsafe group signal.
 
 **Stage B4.2 (experimental branch):** `watchdog-monitor` and opt-in `watchdog-observe` now use the bounded probe instead of a direct blocking check. Deadline expiry yields only `UNKNOWN` and resets the suspect streak. The resident deadline is restricted to 3–20s relative to procd's 30s stop timeout. The timer is created before releasing the probe and cancelling it reaps its sleep child. Short polling falls back to integer `sleep 1` on BusyBox builds without fractional sleep. B5.1 uses private FIFOs and integer `read -t` where supported by ash for event-driven PID/armed/result waits; marker files and the independent deadline remain authoritative. Unsupported shells retain polling. TERM/KILL scenarios were added to CI and QEMU. Not installed on Redmi AX6000; recovery/fail-open remain absent.
 
@@ -37,24 +32,13 @@ This remains strictly `observe-only`: no recovery/fail-open, WAN/VPN/DoH externa
 
 `watchdog-procd-monitor [cycles] [interval]` is a **manual-only, bounded**, read-only event supervisor: it subscribes to `ubus -S subscribe service`, detects `ubusd` changes using PID + process start time, rebinds if the subscriber dies, and independently reads a fresh `watchdog-procd-snapshot` each cycle. A bounded RAM-backed FIFO is created in `/tmp` and removed at exit. Missed events cannot be recovered: **history=INCOMPLETE always**, including after a successful resubscription or healthy snapshot. A PID change without a captured event is logged as `state_change=UNEXPLAINED`, never as a confirmed crash.
 
-Observed respawn/fail events are diagnostics only; when local Podkop maintenance is detected they are marked `diagnosis=MAINTENANCE`. `watchdog-procd-follow` offers explicit continuous, change-only observation, but **is not enabled in procd init**, is not a recovery component and is not installed on the AX6000. The bounded monitor supports 1–30 cycles with 1–30 second interval. No UCI writes, service signals, restart, VPN switching or fail-open are performed. The subscriber is expected to be terminated on exit. This is still experimental until independent QEMU and hardware acceptance.
+Observed respawn/fail events are diagnostics only; when local Podkop maintenance is detected they are marked `diagnosis=MAINTENANCE`. The bounded monitor supports 1–30 cycles with 1–30 second interval. No UCI writes, service signals, restart, VPN switching or fail-open are performed. The subscriber is expected to be terminated on exit. This is still experimental until independent QEMU and hardware acceptance.
 
 ### Stage B1: procd event diagnostics without process control
 
 Experimental `watchdog-procd-event` reads **one JSON event line** from `ubus -S subscribe service` on stdin. It recognizes only `sing-box` / `sing-box.main`, mapping `instance.respawn` to `RESPAWN_REPORTED` and `instance.fail` to `CRASH_LOOP_REPORTED`. Routine start/stop and unrelated services are not treated as crashes. Malformed events are `UNKNOWN`, with no raw event echoed to logs; every result is `action=none`.
 
 `watchdog-procd-snapshot` independently reconciles the current procd instance through `ubus service list`: `RUNNING`, `STOPPED`, `UNREGISTERED`, or `UNKNOWN`. Exit codes alone do not establish a crash cause. This **does not yet subscribe continuously** or handle `ubusd` restart/event loss; those steps require further testing. The real `/usr/bin/sing-box` is distinguished from offline validation processes. Nothing is wired to the persistent observer or recovery, and no processes are signalled or restarted.
-
-
-### Independent local evidence collection (stage 6B1.2, experimental)
-
-`podkop-guard watchdog-evidence` runs two local `watchdog-check` samples around a read-only snapshot of the WAN and selected AWG interface through `netifd/ubus` (and the physical link `carrier` when available). It **does not invoke** `owrt-netguard`, `podkop-vpn-failover`, or `curl`. No external connectivity probes, service changes, route changes, or UCI writes occur, and no companion project is required. Interface names are validated before use.
-
-The `up=true` and `carrier=1` indicators describe *local link state*, **not WAN Internet reachability or remote VPN health**. Without independent path checks, `WAN=UNKNOWN` (except an observed local carrier loss), `VPN=UNKNOWN` even when `vpn_link=UP`, and `DoH=UNKNOWN`. If the local health or selected VPN configuration changes during sampling, the result is `TRANSITION` / `MAINTENANCE`. Every classification reports `authority=observe-only action=none`.
-
-The earlier experimental `--live` switch has been **removed** because it invoked external diagnostic tools; it now exits with code 2. Any future external probes will be small, explicitly bounded self-contained functions, not hard dependencies on companion projects. Existing Failover/NetGuard evidence may still be supplied manually to the pure `watchdog-classify` command, but those projects are not needed to install, operate, or recover Guard.
-
-This collector is not connected to the persistent `watchdog-observe` loop or recovery logic. The Redmi AX6000 continues to run the previously installed `0.3.0-dev` code. Synthetic tests specifically assert that no companion executable is invoked.
 
 
 ## Status
@@ -65,7 +49,7 @@ Current stable version: **0.2.4**.
 
 > **Experimental installer:** supports `opkg`/`apk` (OpenWrt 24.10/25.12), same-filesystem staging, and recovery of worker/init files plus prior running/enabled state on ordinary errors. Verified with shell mocks and in **real OpenWrt 25.12.6 inside QEMU**, using real procd for upgrade, rollback and opt-in but fixture processes instead of the real LKG/Podkop/sing-box runtime. It is **not power-failure atomic**; package installation and optional LuCI custom commands are outside rollback. Persistent LKG files are not replaced or removed. The stable `v0.2.4` installer still targets `opkg`. Use the development installer only in a controlled, backed-up test deployment with a pinned commit.
 
-Experimental worker and installer report **`0.3.0-dev`** and require an explicit SHA-pinned `PODKOP_GUARD_BASE_URL`. The watchdog remains opt-in; its standalone `/etc/config/podkop_guard` UCI file must be initialized before enabling it. The real worker was tested in QEMU and completed a week of observe-only operation on AX6000; the stage 2A classifier has not been deployed there. [QEMU E2E](https://github.com/SVTagan/podkop-guard/actions/runs/43312895095).
+Experimental worker and installer report **`0.3.0-dev`** and require an explicit SHA-pinned `PODKOP_GUARD_BASE_URL`. The watchdog remains opt-in; its standalone `/etc/config/podkop_guard` UCI file must be initialized before enabling it. The real worker was tested in QEMU and completed a week of observe-only operation on AX6000. [QEMU E2E](https://github.com/SVTagan/podkop-guard/actions/runs/43312895095).
 
 **Controlled upgrade:** setting `PODKOP_GUARD_SKIP_LUCI=1` explicitly disables optional `luci-app-commands` installation and any `luci` UCI modifications. It does **not** prevent worker/init replacement or the Guard service restart. Keep a separate persistent backup of the old worker, init, service state and LKG before upgrading; the installer's transactional backups reside in `/tmp` only.
 

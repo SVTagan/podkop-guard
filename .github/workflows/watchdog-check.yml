@@ -20,6 +20,7 @@ jobs:
           sh -n podkop-guard
           sh -n tests/watchdog-check.sh
           sh -n tests/watchdog-monitor.sh
+          sh -n tests/watchdog-research.sh
           sh -n tests/watchdog-classify.sh
           sh -n tests/watchdog-evidence.sh
           sh -n tests/watchdog-procd.sh
@@ -44,8 +45,8 @@ jobs:
         run: |
           sh tests/watchdog-check.sh ./podkop-guard
           sh tests/watchdog-monitor.sh ./podkop-guard
-          sh tests/watchdog-classify.sh ./podkop-guard
-          sh tests/watchdog-evidence.sh ./podkop-guard
+          sh tests/watchdog-classify.sh ./tests/watchdog-research.sh
+          sh tests/watchdog-evidence.sh ./tests/watchdog-research.sh
           sh tests/watchdog-procd.sh ./podkop-guard
           sh tests/watchdog-procd-monitor.sh ./podkop-guard
           sh tests/watchdog-deadline.sh ./podkop-guard

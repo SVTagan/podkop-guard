@@ -123,35 +123,35 @@ esac
 passed=$((passed+1))
 printf 'PASS disconnected_bus\n'
 
-# The explicit continuous observer must honor SIGTERM and reap its own
+# The retained bounded observer must honor SIGTERM and reap its own
 # subscriber without leaving a FIFO in tmpfs.
 PROCD_B2_MODE=quiet; export PROCD_B2_MODE
 printf '700:2000\n' > "$PROCD_B2_BUS_FILE"
 rm -f "$PROCD_B2_COUNT" "$PROCD_B2_SUB_LOG" "$PROCD_B2_FORBIDDEN"
-bash "$worker" watchdog-procd-follow > "$tmp/follow.log" 2>&1 &
-follow_pid=$!
+bash "$worker" watchdog-procd-monitor 30 1 > "$tmp/stop.log" 2>&1 &
+stop_pid=$!
 sleep 2
-kill -TERM "$follow_pid" 2>/dev/null || :
+kill -TERM "$stop_pid" 2>/dev/null || :
 loops=0
-while kill -0 "$follow_pid" 2>/dev/null && [ "$loops" -lt 9 ]; do
+while kill -0 "$stop_pid" 2>/dev/null && [ "$loops" -lt 9 ]; do
     sleep 1
     loops=$((loops + 1))
 done
-if kill -0 "$follow_pid" 2>/dev/null; then
-    kill -KILL "$follow_pid" 2>/dev/null || :
-    wait "$follow_pid" 2>/dev/null || :
-    echo 'FAIL follow SIGTERM not handled' >&2
+if kill -0 "$stop_pid" 2>/dev/null; then
+    kill -KILL "$stop_pid" 2>/dev/null || :
+    wait "$stop_pid" 2>/dev/null || :
+    echo 'FAIL bounded monitor SIGTERM not handled' >&2
     exit 1
 fi
-wait "$follow_pid" 2>/dev/null || :
-grep -Fq 'PROCD_MONITOR_END completed=' "$tmp/follow.log" || {
-    echo 'FAIL follow did not exit cleanly' >&2; exit 1;
+wait "$stop_pid" 2>/dev/null || :
+grep -Fq 'PROCD_MONITOR_END completed=' "$tmp/stop.log" || {
+    echo 'FAIL bounded monitor did not exit cleanly' >&2; exit 1;
 }
 [ -z "$(find "$tmp/ram" -mindepth 1 -print -quit)" ] || {
-    echo 'FAIL follow left FIFO in tmpfs' >&2; exit 1;
+    echo 'FAIL bounded monitor left FIFO in tmpfs' >&2; exit 1;
 }
 passed=$((passed + 1))
-printf 'PASS follow_sigterm_cleanup\n'
+printf 'PASS bounded_sigterm_cleanup\n'
 
 for args in '--restart' '0 1' '31 1' '2 0' '2 31' 'oops 1'; do
     set +e
@@ -163,4 +163,20 @@ for args in '--restart' '0 1' '31 1' '2 0' '2 31' 'oops 1'; do
     }
     passed=$((passed+1))
 done
+# Removed public commands and the old unbounded environment switch must
+# fail without starting a subscriber, external probe or even a local probe.
+rm -f "$PROCD_B2_SUB_LOG" "$PROCD_B2_COUNT" "$PROCD_B2_FORBIDDEN"
+for retired in watchdog-evidence watchdog-classify watchdog-procd-follow; do
+    rc=0
+    out=$(timeout 5 bash "$worker" "$retired" 2>&1) || rc=$?
+    [ "$rc" -eq 2 ] && printf '%s\n' "$out" | grep -Fq "unknown command: $retired" ||
+        { echo "FAIL retired command $retired rc=$rc out=$out" >&2; exit 1; }
+    passed=$((passed + 1)); echo "PASS retired_$retired"
+done
+rc=0
+PODKOP_GUARD_PROCD_UNBOUNDED=1 timeout 5 bash "$worker" watchdog-procd-monitor 0 1 >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$PROCD_B2_SUB_LOG" ] && [ ! -e "$PROCD_B2_COUNT" ] &&
+    [ ! -s "$PROCD_B2_FORBIDDEN" ] && [ -z "$(find "$tmp/ram" -mindepth 1 -print -quit)" ] ||
+    { echo "FAIL retired_unbounded_override rc=$rc" >&2; exit 1; }
+passed=$((passed + 1)); echo PASS retired_unbounded_override
 printf 'PASS: %s bounded procd subscription scenarios\n' "$passed"

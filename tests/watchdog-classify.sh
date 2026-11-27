@@ -1,7 +1,7 @@
 #!/bin/sh
 # Stage A: classifier has TWO independent axes. No source probes or actions.
 set -eu
-worker="${1:-./podkop-guard}"
+worker="${1:-$(dirname "$0")/watchdog-research.sh}"
 case "$worker" in /*) ;; *) worker="$(pwd)/${worker#./}" ;; esac
 passed=0
 

@@ -284,9 +284,19 @@ if grep -q 'state=HEALTHY_SAMPLED' /tmp/pg-real-watch-check; then
     echo "FAIL_REAL_FALSE_HEALTHY" >&2
     exit 1
 fi
-# Stage 6B1: exercise metadata-only evidence on real OpenWrt/BusyBox.
-# The QEMU guest has no usable Podkop or VPN. No live network probes.
-if ! /usr/bin/podkop-guard watchdog-evidence > /tmp/pg-real-evidence 2>&1; then
+# Stage 6B1 research remains tested in the read-only lab bundle, not
+# installed in the production worker. No live network probes.
+test ! -e /usr/bin/watchdog-research.sh
+test ! -L /usr/bin/watchdog-research.sh
+/usr/bin/podkop-guard help > /tmp/pg-worker-help
+for retired in watchdog-evidence watchdog-classify watchdog-procd-follow; do
+    if grep -Fq "$retired" /tmp/pg-worker-help; then
+        echo "FAIL_VM_RESEARCH_PUBLIC_COMMAND $retired" >&2; exit 1
+    fi
+done
+echo PASS_VM_B6_RESEARCH_NOT_INSTALLED
+if ! PODKOP_GUARD_EVIDENCE_CHECK_SCRIPT=/usr/bin/podkop-guard \
+    sh /mnt/pg-bundle/watchdog-research.sh watchdog-evidence > /tmp/pg-real-evidence 2>&1; then
     cat /tmp/pg-real-evidence >&2
     echo FAIL_VM_REAL_EVIDENCE >&2
     exit 1
@@ -296,7 +306,7 @@ grep -Fq 'doh=UNKNOWN doh_source=not_probed mode=metadata' /tmp/pg-real-evidence
 grep -Fq 'authority=observe-only action=none' /tmp/pg-real-evidence
 grep -q '^CLASSIFY local_class=' /tmp/pg-real-evidence
 # Local process suspicion must survive UNKNOWN WAN/VPN/DoH on real BusyBox.
-sh /usr/bin/podkop-guard watchdog-classify SUSPECT_DNS_TIMEOUT UNKNOWN UNKNOWN UNKNOWN > /tmp/pg-local-classify
+sh /mnt/pg-bundle/watchdog-research.sh watchdog-classify SUSPECT_DNS_TIMEOUT UNKNOWN UNKNOWN UNKNOWN > /tmp/pg-local-classify
 grep -Fq 'local_class=BOX_DNS_HUNG_CANDIDATE local_evidence=SUSPECT external_class=EXTERNAL_UNKNOWN' /tmp/pg-local-classify
 grep -Fq 'authority=observe-only action=none' /tmp/pg-local-classify
 echo PASS_VM_TWO_AXIS_LOCAL_INDEPENDENCE
