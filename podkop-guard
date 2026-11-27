@@ -1227,11 +1227,19 @@ watch_config_path() {
 # is private and transient; its digest is a sampled disk generation, not
 # proof of the configuration loaded in the running process.
 watch_config_check() {
-    local validated
+    local result hash_rc digest
     WATCH_CONFIG_ID=
     if watch_config_path "$1"; then
         WATCH_CONFIG_REASON=unsupported_dns_config
-        if validated=$(jq -cesS '
+        # Hash the same validated, sorted JSON without a trailing newline.
+        # FD 3 reports jq status separately from its data stream; the hash
+        # is emitted after EOF. A successful hash alone is not validation.
+        hash_rc=0
+        result=$(
+            exec 3>&1
+            {
+                jq_rc=0
+                jq -jcesS '
             def includes($value):
                 if type == "string" then . == $value
                 elif type == "array" then all(.[]; type == "string") and any(.[]; . == $value)
@@ -1267,11 +1275,22 @@ watch_config_check() {
                     (.route.rules|type) == "array" and dns_in and fakeip_server and
                     service_rule and dns_route)
             else empty end
-        ' "$WATCH_CONFIG_PATH" 2>/dev/null) &&
-        [ -n "$validated" ]; then
-            WATCH_CONFIG_REASON=dns_config_identity_unavailable
-            WATCH_CONFIG_ID=$(watch_command_id "$validated") && return 0
-        fi
+        ' "$WATCH_CONFIG_PATH" 2>/dev/null 3>&- || jq_rc=$?
+                printf 'jq_rc=%s\n' "$jq_rc" >&3
+            } | sha256sum 2>/dev/null 3>&-
+        ) || hash_rc=$?
+        case "$result" in
+            'jq_rc=0'|'jq_rc=0
+'*)
+                WATCH_CONFIG_REASON=dns_config_identity_unavailable
+                digest=${result#*'
+'}
+                digest=${digest%'  -'}
+                if [ "$hash_rc" -eq 0 ] && watch_valid_command_id "$digest"; then
+                    WATCH_CONFIG_ID=$digest
+                    return 0
+                fi ;;
+        esac
     fi
     printf 'WATCHDOG state=UNKNOWN reason=%s pid=%s dns=%s nft=%s\n' "$WATCH_CONFIG_REASON" "$WATCH_PID" "$WATCH_DNS" "$WATCH_NFT"
     return 1

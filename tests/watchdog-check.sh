@@ -166,6 +166,9 @@ case "$WATCH_TEST_CONFIG_CASE" in
     layout_changed_healthy|layout_changed_timeout)
         jq '.log.level = "error"' "$WATCH_TEST_POD_CONFIG" > "$WATCH_TEST_POD_CONFIG.next" || exit 9
         mv "$WATCH_TEST_POD_CONFIG.next" "$WATCH_TEST_POD_CONFIG" ;;
+    layout_format_after_dns)
+        jq -S . "$WATCH_TEST_POD_CONFIG" > "$WATCH_TEST_POD_CONFIG.next" || exit 9
+        mv "$WATCH_TEST_POD_CONFIG.next" "$WATCH_TEST_POD_CONFIG" ;;
 esac
 case "${WATCH_TEST_DNS_MAINTENANCE:-}" in
     reload) mkdir -p "$PODKOP_GUARD_WATCH_PROC_ROOT/321"
@@ -196,6 +199,36 @@ cat > "$tmp/bin/ping" <<'SH'
 exit 1
 SH
 chmod +x "$tmp/bin"/*
+# Fault injection is limited to selected cases. Other jq and command-identity
+# hashes use the real tools. No failure hook exists in the installed worker.
+mkdir -p "$tmp/hash-fault"
+WATCH_TEST_REAL_JQ=$(command -v jq)
+WATCH_TEST_REAL_SHA256=$(command -v sha256sum)
+export WATCH_TEST_REAL_JQ WATCH_TEST_REAL_SHA256
+cat > "$tmp/hash-fault/jq" <<'SH'
+#!/bin/sh
+if [ "$1" = -jcesS ] && [ "$WATCH_TEST_CONFIG_CASE" = layout_jq_partial_failure ]; then
+    printf '{}'
+    exit 5
+fi
+exec "$WATCH_TEST_REAL_JQ" "$@"
+SH
+cat > "$tmp/hash-fault/sha256sum" <<'SH'
+#!/bin/sh
+payload=$(cat)
+case "$payload" in
+    '{'*)
+        case "$WATCH_TEST_CONFIG_CASE" in
+            layout_hash_failure) exit 7 ;;
+            layout_hash_invalid) printf 'bad-digest  -\n'; exit 0 ;;
+            layout_hash_nonzero) printf '%s' "$payload" | "$WATCH_TEST_REAL_SHA256"; exit 7 ;;
+            layout_hash_after_dns)
+                [ ! -e "$WATCH_TEST_DNS_CALLED" ] || exit 7 ;;
+        esac ;;
+esac
+printf '%s' "$payload" | "$WATCH_TEST_REAL_SHA256" "$@"
+SH
+chmod +x "$tmp/hash-fault/"*
 
 tests=0
 case_run() {
@@ -232,6 +265,13 @@ case_run() {
         jq "$filter" "$tmp/config.json" > "$tmp/config.next"
         mv "$tmp/config.next" "$tmp/config.json"
     fi
+    case "$name" in
+        layout_multi_doc) printf '{}\n' >> "$tmp/config.json" ;;
+        layout_trailing_garbage) printf 'not-json\n' >> "$tmp/config.json" ;;
+        layout_large)
+            jq '.route.rules += [range(0;2048) | {domain:["pg-bench-\(.).invalid"],action:"route",outbound:"direct-out"}]' "$tmp/config.json" > "$tmp/config.next"
+            mv "$tmp/config.next" "$tmp/config.json" ;;
+    esac
     cfg_path="$tmp/config.json"
     pod_path=$cfg_path
     box_path=$cfg_path
@@ -275,8 +315,10 @@ case_run() {
     esac
     probe_script="$tmp/raw-worker"
     case "$name" in public_*) probe_script=$script ;; esac
+    probe_path="$tmp/bin:$PATH"
+    case "$name" in layout_hash_*|layout_jq_*) probe_path="$tmp/hash-fault:$probe_path" ;; esac
     set +e
-    output=$(env PATH="$tmp/bin:$PATH" \
+    output=$(env PATH="$probe_path" \
         WATCH_TEST_ARGV_JSON="$argv_json" WATCH_TEST_POD_CONFIG="$pod_path" \
         WATCH_TEST_BOX_CONFIG="$box_path" WATCH_TEST_CONFIG_CASE="$name" \
         PODKOP_GUARD_WATCH_CONFIG="$tmp/config.json" \
@@ -384,7 +426,18 @@ case_run() {
         layout_invalid_after_dns)
             case "$output" in *'reason=unsupported_dns_config '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ -e "$tmp/dns-called" ] || exit 1 ;;
-        layout_scalar_fields|layout_extra_rules) ;;
+        layout_scalar_fields|layout_extra_rules|layout_format_after_dns) ;;
+        layout_large)
+            canonical=$(jq -cS . "$tmp/config.json")
+            expected_id=$(printf '%s' "$canonical" | sha256sum)
+            expected_id=${expected_id%% *}
+            case "$output" in *" config_id=$expected_id") ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
+        layout_hash_failure|layout_hash_invalid|layout_hash_nonzero)
+            case "$output" in *'reason=dns_config_identity_unavailable '*'dns=skipped '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ ! -e "$tmp/dns-called" ] || exit 1 ;;
+        layout_hash_after_dns)
+            case "$output" in *'reason=dns_config_identity_unavailable '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
+            [ -e "$tmp/dns-called" ] || exit 1 ;;
         layout_*)
             case "$output" in *'reason=unsupported_dns_config '*'dns=skipped '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
@@ -431,7 +484,7 @@ case_run() {
             [ ! -e "$tmp/dns-called" ] || exit 1 ;;
     esac
     case "$name" in
-        healthy|public_healthy) case "$output" in *" birth=1000 bus=700:2000 command_id=$fixture_command_id config_id=$fixture_config_id") ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
+        healthy|public_healthy|layout_format_after_dns) case "$output" in *" birth=1000 bus=700:2000 command_id=$fixture_command_id config_id=$fixture_config_id") ;; *) echo "FAIL identity fields: $output" >&2; exit 1 ;; esac ;;
         same_pid_birth_changed*) case "$output" in *'reason=runtime_identity_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         bus_identity_changed*) case "$output" in *'reason=ubusd_changed '*) ;; *) echo "FAIL $name: $output" >&2; exit 1 ;; esac ;;
         wrong_exe|deleted_exe|missing_exe|wrong_argv|missing_argv|truncated_argv|extra_argv)
@@ -500,6 +553,15 @@ done
 case_run layout_changed_healthy TRANSITION 0 healthy present 12345 true 0 valid up
 case_run layout_changed_timeout TRANSITION 0 timeout present 12345 true 0 valid up
 case_run layout_invalid_after_dns UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run layout_format_after_dns HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+case_run layout_large HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+case_run layout_multi_doc UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run layout_trailing_garbage UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run layout_jq_partial_failure UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run layout_hash_failure UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run layout_hash_invalid UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run layout_hash_nonzero UNKNOWN 2 healthy present 12345 true 0 valid up
+case_run layout_hash_after_dns UNKNOWN 2 healthy present 12345 true 0 valid up
 
 
 # A stale PID file is not proof of a running updater.

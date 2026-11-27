@@ -408,6 +408,10 @@ for marker in config_changed config_rearmed config_missing config_invalid config
     grep -Fxq "PASS $marker" /tmp/pg-b3-monitor-tests
 done
 echo PASS_VM_B6_DNS_LAYOUT_FIXTURES
+for marker in layout_format_after_dns layout_large layout_multi_doc layout_trailing_garbage layout_jq_partial_failure layout_hash_failure layout_hash_invalid layout_hash_nonzero layout_hash_after_dns; do
+    grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
+done
+echo PASS_VM_B6_CONFIG_HASH_STREAM
 for marker in public_healthy public_timeout public_unknown; do
     grep -Fxq "PASS $marker" /tmp/pg-b3-watch-tests
 done
