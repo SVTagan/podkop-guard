@@ -693,6 +693,14 @@ printf '/bin/sh\000/tmp/podkop\000list_update\000' > "$tmp/proc/321/cmdline"
 case_run maintenance_wrong_path HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 printf '/bin/sh\000/usr/bin/podkop\000list_update' > "$tmp/proc/321/cmdline"
 case_run maintenance_truncated_token HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+printf '/bin/ash\000/usr/bin/podkop\000restart\000extra\000' > "$tmp/proc/321/cmdline"
+case_run premaintenance_ash_restart TRANSITION 0 healthy present 12345 true 0 valid up
+printf '/bin/sh\000/usr/bin/podkop\000reload\n\000' > "$tmp/proc/321/cmdline"
+case_run maintenance_newline_token HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
+printf '/bin/sh\000/usr/bin/podkop\000reload\000' > "$tmp/proc/321/cmdline"
+# Prefixing a long token cannot shift a later valid token into argv[0].
+printf '01234567890123456789012345678901/usr/bin/podkop\000reload\000' > "$tmp/proc/321/cmdline"
+case_run maintenance_capped_token HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 rm -f "$tmp/proc/321/cmdline"
 # Force the check/use gap in a private copy of the actual maintenance
 # function. No scheduling lottery, actual PID signals or production hook.
@@ -722,6 +730,36 @@ race_output=$(PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/race-proc" \
 }
 tests=$((tests + 1))
 echo PASS maintenance_proc_disappeared
+# Verify exact NUL reader selection without instrumenting the shipped worker.
+awk '
+    /^watch_maintenance_(command|active)\(\) \{/ { active=1 }
+    active { print }
+    active && /^}$/ { active=0; found++ }
+    END { if (found != 2) exit 1 }
+' "$script" > "$tmp/maintenance-reader.sh"
+mkdir -p "$tmp/reader-proc/1" "$tmp/reader-proc/2" "$tmp/reader-proc/3"
+printf '/bin/sh\000-c\000/usr/bin/podkop reload\000' > "$tmp/reader-proc/1/cmdline"
+printf '/usr/bin/sing-box\000run\000' > "$tmp/reader-proc/2/cmdline"
+printf '/bin/ash\000/usr/bin/podkop\000reload\000' > "$tmp/reader-proc/3/cmdline"
+: > "$tmp/reader-calls"
+reader_mode=$(PODKOP_GUARD_WATCH_PROC_ROOT="$tmp/reader-proc" \
+    PODKOP_GUARD_WATCH_LIST_PID_FILE="$tmp/reader-marker-absent" \
+    sh -eu -c '
+        . "$1"
+        log=$2
+        hexdump() { printf "hex\n" >> "$log"; command hexdump "$@"; }
+        watch_maintenance_active
+        [ "$WATCH_MAINTENANCE" = podkop_lifecycle ]
+        calls=$(wc -l < "$log")
+        case "$calls" in
+            0) echo builtin ;;
+            3) echo fallback ;;
+            *) exit 1 ;;
+        esac
+    ' reader "$tmp/maintenance-reader.sh" "$tmp/reader-calls")
+case "$reader_mode" in builtin|fallback) ;; *) exit 1 ;; esac
+echo "PASS maintenance_reader_$reader_mode"
+tests=$((tests + 1))
 case_run public_healthy HEALTHY_SAMPLED 0 healthy present 12345 true 0 valid up
 case_run public_timeout SUSPECT_DNS_TIMEOUT 1 timeout present 12345 true 0 valid up
 case_run public_unknown UNKNOWN 2 invalid present 12345 true 0 valid up

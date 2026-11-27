@@ -1127,6 +1127,24 @@ watch_local_loopback() {
 # Only the supported Podkop script and exact operation token count.
 watch_maintenance_command() {
     local cmd
+    if [ "${maintenance_reader:-hex}" = builtin ]; then
+        # All supported tokens are shorter than 32 bytes. A capped read
+        # cannot match an unterminated token; at most 3 * 32 bytes are read.
+        {
+            IFS= read -r -d '' -n 32 cmd || return 1
+            case "$cmd" in
+                /bin/sh|/bin/ash|sh|ash) IFS= read -r -d '' -n 32 cmd || return 1 ;;
+            esac
+            [ "$cmd" = /usr/bin/podkop ] || return 1
+            IFS= read -r -d '' -n 32 cmd || return 1
+            case "$cmd" in
+                list_update) WATCH_MAINTENANCE=list_update ;;
+                start|stop|reload|restart) WATCH_MAINTENANCE=podkop_lifecycle ;;
+                *) return 1 ;;
+            esac
+        } 2>/dev/null < "$1"
+        return $?
+    fi
     cmd=$(LC_ALL=C hexdump -v -n 128 -e '1/1 "%02x"' "$1" 2>/dev/null) || return 1
     # Strip an optional known shell interpreter (hex includes terminal NUL).
     case "$cmd" in
@@ -1149,10 +1167,23 @@ watch_maintenance_command() {
 }
 
 watch_maintenance_active() {
-    local proc_root list_pid_file pid proc
+    local proc_root list_pid_file pid proc maintenance_reader cmd LC_ALL
+    LC_ALL=C
     proc_root="${PODKOP_GUARD_WATCH_PROC_ROOT:-/proc}"
     list_pid_file="${PODKOP_GUARD_WATCH_LIST_PID_FILE:-/var/run/podkop_list_update.pid}"
     WATCH_MAINTENANCE=""
+    # Detect actual NUL-delimited and length-limited read support once per
+    # scan. Minimal/custom shells without these extensions keep hexdump.
+    maintenance_reader=hex
+    if printf 'x\000y\000abc\000z' | (
+        IFS= read -r -d '' -n 2 cmd && [ "$cmd" = x ] &&
+        IFS= read -r -d '' -n 2 cmd && [ "$cmd" = y ] &&
+        IFS= read -r -d '' -n 2 cmd && [ "$cmd" = ab ] &&
+        IFS= read -r -d '' -n 2 cmd && [ "$cmd" = c ] &&
+        ! IFS= read -r -d '' -n 2 cmd
+    ) 2>/dev/null; then
+        maintenance_reader=builtin
+    fi
 
     if [ -r "$list_pid_file" ]; then
         read -r pid 2>/dev/null < "$list_pid_file" || pid=""
