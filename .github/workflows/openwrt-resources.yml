@@ -1,5 +1,8 @@
 name: OpenWrt resource baseline (24.10 and 25.12)
 
+# B6.2e.3 comparison: keep the 44ca2e26 baseline workload and guest
+# settings unchanged; compare measurements for the optimized worker.
+
 on:
   push:
     branches:
